@@ -13,7 +13,10 @@ adb shell pm clear com.robertotorino.gallery
 ```
 
 ### GitHub
+
 ```powershell
+git pull origin master
+
 git remote add origin git@github.com:RobertoTorino/Gallery.git
 git push -u origin master
 git fetch --all
