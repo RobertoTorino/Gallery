@@ -5,10 +5,14 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.app.WallpaperManager
 import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
@@ -18,6 +22,8 @@ import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.util.Size
+import android.view.View
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -62,6 +68,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterBAndW
 import androidx.compose.material.icons.filled.FolderOff
@@ -74,7 +81,6 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Wallpaper
-import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -114,6 +120,7 @@ import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
@@ -121,7 +128,7 @@ import androidx.core.os.ConfigurationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.exifinterface.media.ExifInterface
-import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import androidx.work.Constraints
@@ -136,13 +143,19 @@ import com.robertotorino.gallery.repository.MediaRepository
 import com.robertotorino.gallery.ui.theme.AppTheme
 import com.robertotorino.gallery.ui.theme.GalleryTheme
 import com.robertotorino.gallery.worker.CleanupWorker
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import kotlin.math.min
+import kotlin.math.roundToLong
+import androidx.media3.common.MediaItem as ExoMediaItem
 
 fun Context.getActivity(): AppCompatActivity? = when (this) {
     is AppCompatActivity -> this
@@ -195,6 +208,24 @@ fun getRealPathFromTreeUri(treeUri: Uri): String? {
         }
     }
     return null
+}
+
+fun openManagedFolderInPicker(context: Context, folderName: String) {
+    val documentId = "primary:Android/data/${context.packageName}/files/$folderName"
+    val initialUri = DocumentsContract.buildTreeDocumentUri(
+        "com.android.externalstorage.documents",
+        documentId
+    )
+    val openFolderIntent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+        putExtra(DocumentsContract.EXTRA_INITIAL_URI, initialUri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    try {
+        context.startActivity(openFolderIntent)
+    } catch (_: Exception) {
+        val path = context.getExternalFilesDir(folderName)?.absolutePath ?: folderName
+        Toast.makeText(context, "Could not open folder picker. Folder path: $path", Toast.LENGTH_LONG).show()
+    }
 }
 
 fun queryImages(context: Context): List<Uri> {
@@ -262,7 +293,13 @@ fun resolveToMediaStoreUri(context: Context, uri: Uri): Uri {
     if (uri.toString().contains("photopicker")) {
         val id = uri.lastPathSegment?.toLongOrNull()
         if (id != null) {
-            return ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+            val mimeType = runCatching { context.contentResolver.getType(uri) }.getOrNull()
+            val baseUri = if (mimeType?.startsWith("video/") == true) {
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            } else {
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+            }
+            return ContentUris.withAppendedId(baseUri, id)
         }
     }
     if (DocumentsContract.isDocumentUri(context, uri)) {
@@ -271,6 +308,12 @@ fun resolveToMediaStoreUri(context: Context, uri: Uri): Uri {
             val id = docId.split(":")[1].toLongOrNull()
             if (id != null) {
                 return ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+            }
+        }
+        if (docId.startsWith("video:")) {
+            val id = docId.split(":")[1].toLongOrNull()
+            if (id != null) {
+                return ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
             }
         }
     }
@@ -301,16 +344,12 @@ fun calculateUsedStorageBytes(context: Context, uris: List<Uri>): Long {
     return uris.sumOf { uri -> getUriSizeInBytes(context, uri) }
 }
 
-fun getVideoThumbnailBitmap(context: Context, uri: Uri): android.graphics.Bitmap? {
+fun getVideoThumbnailBitmap(context: Context, uri: Uri): Bitmap? {
     val mediaStoreUri = resolveToMediaStoreUri(context, uri)
     val id = mediaStoreUri.lastPathSegment?.toLongOrNull() ?: return null
+    val mediaUri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
     return try {
-        MediaStore.Video.Thumbnails.getThumbnail(
-            context.contentResolver,
-            id,
-            MediaStore.Video.Thumbnails.MINI_KIND,
-            null
-        )
+        context.contentResolver.loadThumbnail(mediaUri, Size(512, 512), null)
     } catch (_: Exception) {
         null
     }
@@ -319,10 +358,80 @@ fun getVideoThumbnailBitmap(context: Context, uri: Uri): android.graphics.Bitmap
 fun formatMegabytes(bytes: Long, locale: Locale = Locale.getDefault()): String {
     if (bytes <= 0L) return "0.0 MB"
     val megabytes = bytes.toDouble() / (1024.0 * 1024.0)
-    return if (megabytes >= 100.0) {
+    return if (megabytes >= 1000.0) {
+        val grouped = String.format(Locale.US, "%,d", megabytes.roundToLong()).replace(',', '.')
+        "$grouped MB"
+    } else if (megabytes >= 100.0) {
         String.format(locale, "%.0f MB", megabytes)
     } else {
         String.format(locale, "%.1f MB", megabytes)
+    }
+}
+
+fun cropImageAndSaveCopy(context: Context, uri: Uri): Uri? {
+    val resolver = context.contentResolver
+    val sourceUri = resolveToMediaStoreUri(context, uri)
+    val sourceBitmap = resolver.openInputStream(sourceUri)?.use(BitmapFactory::decodeStream) ?: return null
+    val cropSize = min(sourceBitmap.width, sourceBitmap.height)
+    val left = (sourceBitmap.width - cropSize) / 2
+    val top = (sourceBitmap.height - cropSize) / 2
+    val croppedBitmap = Bitmap.createBitmap(sourceBitmap, left, top, cropSize, cropSize)
+
+    val baseName = resolver.query(
+        sourceUri,
+        arrayOf(OpenableColumns.DISPLAY_NAME),
+        null,
+        null,
+        null
+    )?.use { cursor ->
+        val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+        if (nameIndex != -1 && cursor.moveToFirst()) {
+            cursor.getString(nameIndex)
+        } else {
+            null
+        }
+    }?.substringBeforeLast('.') ?: "image"
+
+    val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+    val fileName = "${baseName}_crop_$timestamp.jpg"
+    val contentValues = ContentValues().apply {
+        put(MediaStore.Images.Media.DISPLAY_NAME, fileName)
+        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+        put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/Gallery")
+        put(MediaStore.Images.Media.IS_PENDING, 1)
+    }
+    val outputUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+        ?: run {
+            if (croppedBitmap != sourceBitmap) croppedBitmap.recycle()
+            sourceBitmap.recycle()
+            return null
+        }
+
+    return try {
+        val outputStream = resolver.openOutputStream(outputUri) ?: throw IOException("Output stream is null")
+        outputStream.use { stream ->
+            if (!croppedBitmap.compress(Bitmap.CompressFormat.JPEG, 95, stream)) {
+                throw IOException("Failed to compress cropped image")
+            }
+        }
+        val finalizeValues = ContentValues().apply {
+            put(MediaStore.Images.Media.IS_PENDING, 0)
+        }
+        resolver.update(outputUri, finalizeValues, null, null)
+        outputUri
+    } catch (_: IOException) {
+        resolver.delete(outputUri, null, null)
+        null
+    } catch (_: SecurityException) {
+        resolver.delete(outputUri, null, null)
+        null
+    } catch (_: IllegalArgumentException) {
+        resolver.delete(outputUri, null, null)
+        null
+    } finally {
+        if (croppedBitmap != sourceBitmap) croppedBitmap.recycle()
+        sourceBitmap.recycle()
     }
 }
 
@@ -475,6 +584,16 @@ data class EditState(
     }
 }
 
+enum class ExclusionMediaType {
+    PICTURES,
+    VIDEOS
+}
+
+enum class DeleteMediaType {
+    PICTURES,
+    VIDEOS
+}
+
 @SuppressLint("AutoboxingStateCreation")
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -493,12 +612,14 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var imageEdits by rememberSaveable { mutableStateOf(mapOf<Uri, EditState>()) }
     var showSettingsMenu by remember { mutableStateOf(false) }
     var showMetadataDialog by remember { mutableStateOf(false) }
+    var showVideoMetadataDialog by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var showArchiveDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
     var urisToDelete by remember { mutableStateOf<List<Uri>>(emptyList()) }
     var urisToArchive by remember { mutableStateOf<List<Uri>>(emptyList()) }
-    var excludedFolders by remember { mutableStateOf(setOf<String>()) }
+    var excludedPictureFolders by remember { mutableStateOf(setOf<String>()) }
+    var excludedVideoFolders by remember { mutableStateOf(setOf<String>()) }
     var showWallpaperConfirm by remember { mutableStateOf(false) }
     var pendingWallpaperUri by remember { mutableStateOf<Uri?>(null) }
 
@@ -516,8 +637,11 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var usedVideoBytes by remember { mutableStateOf(0L) }
     var selectedVideoUri by remember { mutableStateOf<Uri?>(null) }
     var showVideoPlayer by remember { mutableStateOf(false) }
+    var videoMetadataRemovedUris by rememberSaveable { mutableStateOf(setOf<Uri>()) }
+    var deleteMediaType by remember { mutableStateOf(DeleteMediaType.PICTURES) }
 
     var showExcludedFoldersDialog by remember { mutableStateOf(false) }
+    var exclusionMediaType by remember { mutableStateOf(ExclusionMediaType.PICTURES) }
     var showPreExcludeConfirm by remember { mutableStateOf(false) }
     var showPostExcludeConfirm by remember { mutableStateOf(false) }
     var pendingExcludedUri by remember { mutableStateOf<Uri?>(null) }
@@ -527,8 +651,14 @@ fun GalleryScreen(initialUri: Uri? = null) {
 
     // Load images from MediaStore and saved folders
     LaunchedEffect(Unit) {
-        val savedFolders = prefs.getStringSet("excluded_folders", emptySet()) ?: emptySet()
-        excludedFolders = savedFolders
+        val savedPictureFolders =
+            prefs.getStringSet(
+                "excluded_picture_folders",
+                prefs.getStringSet("excluded_folders", emptySet()) ?: emptySet()
+            ) ?: emptySet()
+        val savedVideoFolders = prefs.getStringSet("excluded_video_folders", emptySet()) ?: emptySet()
+        excludedPictureFolders = savedPictureFolders
+        excludedVideoFolders = savedVideoFolders
 
         val savedUris =
             prefs.getStringSet("added_uris", emptySet())?.map { Uri.parse(it) } ?: emptyList()
@@ -559,8 +689,12 @@ fun GalleryScreen(initialUri: Uri? = null) {
         prefs.edit().putBoolean("archive_after_30_days", archiveAfter30Days).apply()
     }
 
-    LaunchedEffect(excludedFolders) {
-        prefs.edit().putStringSet("excluded_folders", excludedFolders).apply()
+    LaunchedEffect(excludedPictureFolders) {
+        prefs.edit().putStringSet("excluded_picture_folders", excludedPictureFolders).apply()
+    }
+
+    LaunchedEffect(excludedVideoFolders) {
+        prefs.edit().putStringSet("excluded_video_folders", excludedVideoFolders).apply()
     }
 
     LaunchedEffect(selectedImageUris) {
@@ -571,16 +705,16 @@ fun GalleryScreen(initialUri: Uri? = null) {
         }
     }
 
-    val filteredUris = remember(selectedImageUris, excludedFolders) {
+    val filteredUris = remember(selectedImageUris, excludedPictureFolders) {
         selectedImageUris.filter { uri ->
             val path = getRealPathFromUri(context, uri) ?: uri.toString()
-            excludedFolders.none { excluded -> path.startsWith(excluded) }
+            excludedPictureFolders.none { excluded -> path.startsWith(excluded) }
         }
     }
-    val filteredVideoUris = remember(videoUris, excludedFolders) {
+    val filteredVideoUris = remember(videoUris, excludedVideoFolders) {
         videoUris.filter { uri ->
             val path = getRealPathFromUri(context, uri) ?: uri.toString()
-            excludedFolders.none { excluded -> path.startsWith(excluded) }
+            excludedVideoFolders.none { excluded -> path.startsWith(excluded) }
         }
     }
 
@@ -604,17 +738,26 @@ fun GalleryScreen(initialUri: Uri? = null) {
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            selectedImageUris = selectedImageUris.filterNot { it in urisToDelete }
-            if (selectedImageIndex != null && selectedImageUris.isEmpty()) {
-                selectedImageIndex = null
+            val deletedUris = urisToDelete
+            selectedImageUris = selectedImageUris.filterNot { it in deletedUris }
+            videoUris = videoUris.filterNot { it in deletedUris }
+            checkedUris = checkedUris.filterNot { it in deletedUris }.toSet()
+            selectedImageIndex = selectedImageIndex?.takeIf { index ->
+                val currentUri = filteredUris.getOrNull(index)
+                currentUri != null && currentUri !in deletedUris
+            }
+            if (selectedVideoUri in deletedUris) {
+                selectedVideoUri = null
+                showVideoPlayer = false
             }
             urisToDelete = emptyList()
-            Toast.makeText(context, "Picture(s) deleted", Toast.LENGTH_SHORT).show()
+            val deletedMediaLabel = if (deleteMediaType == DeleteMediaType.VIDEOS) "Video(s)" else "Picture(s)"
+            Toast.makeText(context, "$deletedMediaLabel deleted", Toast.LENGTH_SHORT).show()
         }
     }
 
     fun resolveToMediaStoreUri(uri: Uri): Uri {
-        return com.robertotorino.gallery.resolveToMediaStoreUri(context, uri)
+        return resolveToMediaStoreUri(context, uri)
     }
 
     fun deleteImages(uris: List<Uri>) {
@@ -625,12 +768,23 @@ fun GalleryScreen(initialUri: Uri? = null) {
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     super.onAuthenticationSucceeded(result)
+                    val targetMediaLabel = if (deleteMediaType == DeleteMediaType.VIDEOS) "Video(s)" else "Picture(s)"
                     if (useRecycleBin) {
                         scope.launch {
                             moveToRecycleBinInternal(uris, context, repository)
                             selectedImageUris = selectedImageUris.filterNot { it in uris }
+                            videoUris = videoUris.filterNot { it in uris }
                             checkedUris = checkedUris.filterNot { it in uris }.toSet()
-                            Toast.makeText(context, "Picture(s) moved to Recycle Bin", Toast.LENGTH_SHORT).show()
+                            selectedImageIndex = selectedImageIndex?.takeIf { index ->
+                                val currentUri = filteredUris.getOrNull(index)
+                                currentUri != null && currentUri !in uris
+                            }
+                            if (selectedVideoUri in uris) {
+                                selectedVideoUri = null
+                                showVideoPlayer = false
+                            }
+                            urisToDelete = emptyList()
+                            Toast.makeText(context, "$targetMediaLabel moved to Recycle Bin", Toast.LENGTH_SHORT).show()
                         }
                     } else {
                         try {
@@ -638,7 +792,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                             if (resolvedUris.isEmpty()) {
                                 Toast.makeText(
                                     context,
-                                    "Could not find picture on device storage",
+                                    "Could not find media on device storage",
                                     Toast.LENGTH_LONG
                                 ).show()
                                 return
@@ -906,6 +1060,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                             .clickable {
                                                 selectedVideoUri = uri
                                                 showVideoPlayer = true
+                                                showVideoMetadataDialog = false
                                             }
                                     ) {
                                         if (videoThumbnail != null) {
@@ -942,10 +1097,10 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 Surface(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(horizontal = 24.dp)
+                        .padding(horizontal = 8.dp)
                         .padding(bottom = 12.dp)
                         .navigationBarsPadding()
-                        .fillMaxWidth(0.95f)
+                        .fillMaxWidth()
                         .height(48.dp),
                     shape = RoundedCornerShape(24.dp),
                     color = AppTheme.colors.cardBackground.copy(alpha = 0.85f),
@@ -1011,13 +1166,14 @@ fun GalleryScreen(initialUri: Uri? = null) {
                             urisToArchive = checkedUris.toList(); showArchiveDialog = true
                         }) {
                             Icon(
-                                Icons.Default.Inventory,
+                                Icons.Default.Archive,
                                 contentDescription = "Archive Selected",
                                 tint = AppTheme.colors.textPrimary,
                                 modifier = Modifier.size(28.dp)
                             )
                         }
                         IconButton(onClick = {
+                            deleteMediaType = DeleteMediaType.PICTURES
                             urisToDelete = checkedUris.toList(); showDeleteDialog = true
                         }) {
                             Icon(
@@ -1116,14 +1272,14 @@ fun GalleryScreen(initialUri: Uri? = null) {
                         Surface(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
-                                .padding(horizontal = 24.dp)
+                                .padding(horizontal = 8.dp)
                                 .padding(bottom = 12.dp)
                                 .navigationBarsPadding()
-                                .fillMaxWidth(0.95f)
+                                .fillMaxWidth()
                                 .height(48.dp),
                             shape = RoundedCornerShape(24.dp),
-                            color = AppTheme.colors.cardBackground.copy(alpha = 0.75f),
-                            tonalElevation = 8.dp
+                            color = Color.Transparent,
+                            tonalElevation = 0.dp
                         ) {
                             Row(
                                 modifier = Modifier
@@ -1197,6 +1353,28 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                         modifier = Modifier.size(28.dp)
                                     )
                                 }
+                                IconButton(onClick = {
+                                    currentUri?.let { uri ->
+                                        scope.launch {
+                                            val croppedUri = withContext(Dispatchers.IO) {
+                                                cropImageAndSaveCopy(context, uri)
+                                            }
+                                            if (croppedUri != null) {
+                                                selectedImageUris = (listOf(croppedUri) + selectedImageUris).distinct()
+                                                Toast.makeText(context, "Cropped copy saved", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "Could not crop image", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }
+                                }) {
+                                    Icon(
+                                        Icons.Default.Crop,
+                                        "Crop and Save Copy",
+                                        tint = AppTheme.colors.boxText,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
                                 IconButton(onClick = { showMetadataDialog = true }) {
                                     Icon(
                                         Icons.Default.Info,
@@ -1219,6 +1397,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                     )
                                 }
                                 IconButton(onClick = {
+                                    deleteMediaType = DeleteMediaType.PICTURES
                                     urisToDelete = listOf(currentUri!!); showDeleteDialog = true
                                 }) {
                                     Icon(
@@ -1253,7 +1432,16 @@ fun GalleryScreen(initialUri: Uri? = null) {
     if (showSettingsMenu) {
         SettingsDialog(
             onDismiss = { showSettingsMenu = false },
-            onExcludeFolders = { showSettingsMenu = false; showExcludedFoldersDialog = true },
+            onExcludePictureFolders = {
+                exclusionMediaType = ExclusionMediaType.PICTURES
+                showSettingsMenu = false
+                showExcludedFoldersDialog = true
+            },
+            onExcludeVideoFolders = {
+                exclusionMediaType = ExclusionMediaType.VIDEOS
+                showSettingsMenu = false
+                showExcludedFoldersDialog = true
+            },
             onManagePermissions = {
                 showSettingsMenu = false
                 val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
@@ -1281,6 +1469,14 @@ fun GalleryScreen(initialUri: Uri? = null) {
             onAbout = { showSettingsMenu = false; showAboutDialog = true },
             onRecycleBin = { showSettingsMenu = false; showRecycleBinSettings = true },
             onArchive = { showSettingsMenu = false; showArchiveSettings = true },
+            onOpenRecycleBinFolder = {
+                showSettingsMenu = false
+                openManagedFolderInPicker(context, "RecycleBin")
+            },
+            onOpenArchiveFolder = {
+                showSettingsMenu = false
+                openManagedFolderInPicker(context, "Archive")
+            },
             onUsedStorage = { showSettingsMenu = false; showUsedStorageDialog = true }
         )
     }
@@ -1290,8 +1486,25 @@ fun GalleryScreen(initialUri: Uri? = null) {
             uri = selectedVideoUri!!,
             onDismiss = {
                 showVideoPlayer = false
+                showVideoMetadataDialog = false
                 selectedVideoUri = null
+            },
+            onMetadata = { showVideoMetadataDialog = true },
+            onDelete = { uri ->
+                deleteMediaType = DeleteMediaType.VIDEOS
+                urisToDelete = listOf(uri)
+                showDeleteDialog = true
             }
+        )
+    }
+
+    if (showVideoMetadataDialog && selectedVideoUri != null) {
+        val uri = selectedVideoUri!!
+        VideoMetadataDialog(
+            uri = uri,
+            metadataRemoved = uri in videoMetadataRemovedUris,
+            onRemoveMetadata = { videoMetadataRemovedUris = videoMetadataRemovedUris + uri },
+            onDismiss = { showVideoMetadataDialog = false }
         )
     }
 
@@ -1311,8 +1524,33 @@ fun GalleryScreen(initialUri: Uri? = null) {
 
     if (showExcludedFoldersDialog) {
         ExcludedFoldersDialog(
-            excludedFolders = excludedFolders,
-            onRemoveFolder = { folder -> excludedFolders = excludedFolders - folder },
+            title = if (exclusionMediaType == ExclusionMediaType.PICTURES) {
+                "Excluded Picture Folders"
+            } else {
+                "Excluded Video Folders"
+            },
+            excludedFolders = if (exclusionMediaType == ExclusionMediaType.PICTURES) {
+                excludedPictureFolders
+            } else {
+                excludedVideoFolders
+            },
+            emptyText = if (exclusionMediaType == ExclusionMediaType.PICTURES) {
+                "No picture folders excluded."
+            } else {
+                "No video folders excluded."
+            },
+            addButtonLabel = if (exclusionMediaType == ExclusionMediaType.PICTURES) {
+                "Add picture folders for exclusions"
+            } else {
+                "Add video folders for exclusions"
+            },
+            onRemoveFolder = { folder ->
+                if (exclusionMediaType == ExclusionMediaType.PICTURES) {
+                    excludedPictureFolders = excludedPictureFolders - folder
+                } else {
+                    excludedVideoFolders = excludedVideoFolders - folder
+                }
+            },
             onAddFolder = { showPreExcludeConfirm = true },
             onDismiss = { showExcludedFoldersDialog = false }
         )
@@ -1330,7 +1568,11 @@ fun GalleryScreen(initialUri: Uri? = null) {
             },
             text = {
                 Text(
-                    "Allow app to exclude folders?",
+                    if (exclusionMediaType == ExclusionMediaType.PICTURES) {
+                        "Allow app to exclude picture folders?"
+                    } else {
+                        "Allow app to exclude video folders?"
+                    },
                     color = AppTheme.colors.textSecondary
                 )
             },
@@ -1370,7 +1612,11 @@ fun GalleryScreen(initialUri: Uri? = null) {
             },
             text = {
                 Text(
-                    "Allow exclusion for the \"$folderName\" folder? Pictures inside this folder will not be visible in the app.",
+                    if (exclusionMediaType == ExclusionMediaType.PICTURES) {
+                        "Allow exclusion for the \"$folderName\" folder? Pictures inside this folder will not be visible in the app."
+                    } else {
+                        "Allow exclusion for the \"$folderName\" folder? Videos inside this folder will not be visible in the app."
+                    },
                     color = AppTheme.colors.textSecondary
                 )
             },
@@ -1379,8 +1625,13 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 TextButton(onClick = {
                     val path = getRealPathFromTreeUri(pendingExcludedUri!!)
                     if (path != null) {
-                        excludedFolders = excludedFolders + path
-                        Toast.makeText(context, "Folder excluded", Toast.LENGTH_SHORT).show()
+                        if (exclusionMediaType == ExclusionMediaType.PICTURES) {
+                            excludedPictureFolders = excludedPictureFolders + path
+                            Toast.makeText(context, "Picture folder excluded", Toast.LENGTH_SHORT).show()
+                        } else {
+                            excludedVideoFolders = excludedVideoFolders + path
+                            Toast.makeText(context, "Video folder excluded", Toast.LENGTH_SHORT).show()
+                        }
                     } else {
                         Toast.makeText(context, "Could not resolve folder path", Toast.LENGTH_SHORT)
                             .show()
@@ -1415,8 +1666,14 @@ fun GalleryScreen(initialUri: Uri? = null) {
             },
             text = {
                 Text(
-                    if (isDefaultSettings) "Before you continue make sure to first check the settings menu for the recycle bin and archive settings. By default selected pictures will be permanently deleted from this device!"
-                    else "Are you sure you want to continue? Selected picture(s) will be ${if (useRecycleBin) "moved to the Recycle Bin" else "permanently deleted"}!",
+                    if (isDefaultSettings) {
+                        val mediaLabel = if (deleteMediaType == DeleteMediaType.VIDEOS) "videos" else "pictures"
+                        "Before you continue make sure to first check the settings menu for the recycle bin and archive settings. By default selected $mediaLabel will be permanently deleted from this device!"
+                    }
+                    else {
+                        val mediaLabel = if (deleteMediaType == DeleteMediaType.VIDEOS) "video(s)" else "picture(s)"
+                        "Are you sure you want to continue? Selected $mediaLabel will be ${if (useRecycleBin) "moved to the Recycle Bin" else "permanently deleted"}!"
+                    },
                     color = AppTheme.colors.textSecondary,
                     fontWeight = FontWeight.Bold
                 )
@@ -1577,13 +1834,16 @@ fun GalleryScreen(initialUri: Uri? = null) {
 @Composable
 fun SettingsDialog(
     onDismiss: () -> Unit,
-    onExcludeFolders: () -> Unit,
+    onExcludePictureFolders: () -> Unit,
+    onExcludeVideoFolders: () -> Unit,
     onManagePermissions: () -> Unit,
     onCloudMediaAccess: () -> Unit,
     onSetAsDefault: () -> Unit,
     onAbout: () -> Unit,
     onRecycleBin: () -> Unit,
     onArchive: () -> Unit,
+    onOpenRecycleBinFolder: () -> Unit,
+    onOpenArchiveFolder: () -> Unit,
     onUsedStorage: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -1648,7 +1908,49 @@ fun SettingsDialog(
                 }
 
                 TextButton(
-                    onClick = onExcludeFolders,
+                    onClick = onOpenRecycleBinFolder,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = null,
+                            tint = AppTheme.colors.textPrimary
+                        )
+                        Spacer(Modifier.width(12.dp)); Text(
+                        "Open Recycle Bin folder",
+                        color = AppTheme.colors.textPrimary
+                    )
+                    }
+                }
+
+                TextButton(
+                    onClick = onOpenArchiveFolder,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Archive,
+                            contentDescription = null,
+                            tint = AppTheme.colors.textPrimary
+                        )
+                        Spacer(Modifier.width(12.dp)); Text(
+                        "Open Archive folder",
+                        color = AppTheme.colors.textPrimary
+                    )
+                    }
+                }
+
+                TextButton(
+                    onClick = onExcludePictureFolders,
                     modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(12.dp)
                 ) {
@@ -1662,7 +1964,28 @@ fun SettingsDialog(
                             tint = AppTheme.colors.textPrimary
                         )
                         Spacer(Modifier.width(12.dp)); Text(
-                        "Exclude folders",
+                        "Exclude picture folders",
+                        color = AppTheme.colors.textPrimary
+                    )
+                    }
+                }
+
+                TextButton(
+                    onClick = onExcludeVideoFolders,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.FolderOff,
+                            contentDescription = null,
+                            tint = AppTheme.colors.textPrimary
+                        )
+                        Spacer(Modifier.width(12.dp)); Text(
+                        "Exclude video folders",
                         color = AppTheme.colors.textPrimary
                     )
                     }
@@ -1817,12 +2140,17 @@ fun UsedStorageDialog(
     )
 }
 
+@UnstableApi
+@androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun VideoPlayerDialog(
     uri: Uri,
-    onDismiss: () -> Unit
+    onDismiss: () -> Unit,
+    onMetadata: () -> Unit,
+    onDelete: (Uri) -> Unit
 ) {
     val context = LocalContext.current
+    var showVideoToolbar by remember { mutableStateOf(false) }
     val player = remember(context, uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(ExoMediaItem.fromUri(uri))
@@ -1852,8 +2180,13 @@ fun VideoPlayerDialog(
                     PlayerView(ctx).apply {
                         this.player = player
                         useController = true
+                        hideController()
+                        setControllerVisibilityListener(PlayerView.ControllerVisibilityListener { visibility ->
+                            showVideoToolbar = visibility == View.VISIBLE
+                        })
                     }
                 },
+                update = { view -> view.player = player },
                 modifier = Modifier.fillMaxSize()
             )
 
@@ -1869,13 +2202,156 @@ fun VideoPlayerDialog(
                     tint = Color.White
                 )
             }
+
+            if (showVideoToolbar) {
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 8.dp)
+                        .padding(bottom = 76.dp)
+                        .navigationBarsPadding()
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    shape = RoundedCornerShape(24.dp),
+                    color = Color.Transparent,
+                    tonalElevation = 0.dp
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        IconButton(onClick = onMetadata) {
+                            Icon(
+                                Icons.Default.Info,
+                                contentDescription = "Video metadata",
+                                tint = AppTheme.colors.boxText,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
+                        IconButton(onClick = { onDelete(uri) }) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Delete video",
+                                tint = AppTheme.colors.boxText,
+                                modifier = Modifier.size(28.dp)
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
+fun VideoMetadataDialog(
+    uri: Uri,
+    metadataRemoved: Boolean,
+    onRemoveMetadata: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    var fileName by remember { mutableStateOf("Unknown") }
+    var fileSize by remember { mutableStateOf("Unknown") }
+    var videoMetadata by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+
+    LaunchedEffect(uri, metadataRemoved) {
+        try {
+            context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                val nameIndex = cursor.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (cursor.moveToFirst()) {
+                    if (nameIndex != -1) {
+                        fileName = cursor.getString(nameIndex) ?: "Unknown"
+                    }
+                    if (sizeIndex != -1 && !cursor.isNull(sizeIndex)) {
+                        fileSize = "${cursor.getLong(sizeIndex) / 1024} KB"
+                    }
+                }
+            }
+        } catch (_: Exception) {
+            fileName = uri.lastPathSegment ?: "Unknown"
+        }
+
+        if (!metadataRemoved) {
+            val mediaStoreUri = resolveToMediaStoreUri(context, uri)
+            val retriever = MediaMetadataRetriever()
+            try {
+                retriever.setDataSource(context, mediaStoreUri)
+                val metadata = linkedMapOf<String, String>()
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.let {
+                    metadata["Duration"] = "${it.toLongOrNull()?.div(1000) ?: 0}s"
+                }
+                val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
+                val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
+                if (!width.isNullOrBlank() && !height.isNullOrBlank()) {
+                    metadata["Resolution"] = "${width}x$height"
+                }
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE)?.let {
+                    metadata["MIME type"] = it
+                }
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)?.let {
+                    metadata["Date"] = it
+                }
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_LOCATION)?.let {
+                    metadata["Location"] = it
+                }
+                videoMetadata = metadata
+            } catch (_: Exception) {
+                videoMetadata = emptyMap()
+            } finally {
+                retriever.release()
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "Metadata",
+                color = AppTheme.colors.textPrimary,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        containerColor = AppTheme.colors.background,
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                Text("File Name: $fileName", color = AppTheme.colors.textPrimary)
+                Text("Size: $fileSize", color = AppTheme.colors.textPrimary)
+                if (!metadataRemoved) {
+                    videoMetadata.forEach { (key, value) ->
+                        Text("$key: $value", color = AppTheme.colors.textPrimary)
+                    }
+                } else {
+                    Text("Metadata has been removed.", color = Color.White)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = AppTheme.colors.accent)
+            }
+        },
+        dismissButton = {
+            if (!metadataRemoved) {
+                TextButton(onClick = onRemoveMetadata) {
+                    Text("Remove Metadata", color = Color.White)
+                }
+            }
+        }
+    )
+}
+
+@Composable
 fun ExcludedFoldersDialog(
+    title: String,
     excludedFolders: Set<String>,
+    emptyText: String,
+    addButtonLabel: String,
     onRemoveFolder: (String) -> Unit,
     onAddFolder: () -> Unit,
     onDismiss: () -> Unit
@@ -1892,7 +2368,7 @@ fun ExcludedFoldersDialog(
                 .padding(16.dp)
                 .fillMaxWidth()) {
                 Text(
-                    text = "Excluded Folders",
+                    text = title,
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.headlineSmall,
                     color = AppTheme.colors.textPrimary,
@@ -1900,7 +2376,7 @@ fun ExcludedFoldersDialog(
                 )
                 if (excludedFolders.isEmpty()) {
                     Text(
-                        text = "No folders excluded.",
+                        text = emptyText,
                         color = AppTheme.colors.textSecondary,
                         modifier = Modifier.padding(vertical = 8.dp)
                     )
@@ -1943,7 +2419,7 @@ fun ExcludedFoldersDialog(
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(containerColor = AppTheme.colors.boxBackground)
                 ) {
-                    Text("Add folders for exclusions", color = Color.White)
+                    Text(addButtonLabel, color = Color.White)
                 }
                 TextButton(
                     onClick = onDismiss,
@@ -2095,22 +2571,22 @@ fun MetadataDialog(
 fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
     val mediaStoreUri = resolveToMediaStoreUri(context, uri)
     val projection = arrayOf(
-        MediaStore.Images.Media.DATA,
-        MediaStore.Images.Media.DISPLAY_NAME,
-        MediaStore.Images.Media.SIZE,
-        MediaStore.Images.Media.MIME_TYPE,
-        MediaStore.Images.Media.DATE_ADDED
+        MediaStore.MediaColumns.DATA,
+        MediaStore.MediaColumns.DISPLAY_NAME,
+        MediaStore.MediaColumns.SIZE,
+        MediaStore.MediaColumns.MIME_TYPE,
+        MediaStore.MediaColumns.DATE_ADDED
     )
 
     var mediaItem: MediaItem? = null
     try {
         context.contentResolver.query(mediaStoreUri, projection, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
-                val path = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA))
-                val name = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME))
-                val size = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE))
-                val mimeType = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE))
-                val dateAdded = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED))
+                val path = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATA))
+                val name = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME))
+                val size = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE))
+                val mimeType = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE))
+                val dateAdded = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED))
                 mediaItem = MediaItem(uri, path, name, size, mimeType, dateAdded)
             }
         }
@@ -2123,7 +2599,8 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
                 if (cursor.moveToFirst()) {
                     val name = cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) ?: "Unknown"
                     val size = cursor.getLong(cursor.getColumnIndexOrThrow(OpenableColumns.SIZE))
-                    mediaItem = MediaItem(uri, uri.path ?: "", name, size, "image/*", System.currentTimeMillis() / 1000)
+                    val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                    mediaItem = MediaItem(uri, uri.path ?: "", name, size, mimeType, System.currentTimeMillis() / 1000)
                 }
             }
         } catch (_: Exception) {}

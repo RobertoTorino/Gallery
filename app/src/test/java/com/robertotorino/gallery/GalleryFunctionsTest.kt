@@ -22,6 +22,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 import android.database.Cursor
+import java.util.Locale
 
 class GalleryFunctionsTest {
     @Before
@@ -51,7 +52,7 @@ class GalleryFunctionsTest {
     fun getUriSizeInBytes_usesPrimaryUriSizeWhenAvailable() {
         val uri = mockk<Uri>()
         every { Uri.parse("content://example/image/1") } returns uri
-        
+
         val context = mockk<Context>()
         val resolver = mockk<ContentResolver>()
         val cursor = mockk<Cursor>()
@@ -136,6 +137,24 @@ class GalleryFunctionsTest {
         val result = calculateUsedStorageBytes(context, listOf(uriOne, uriTwo))
 
         assertEquals(35L, result)
+    }
+
+    @Test
+    fun formatMegabytes_usesDotGroupingForThousands() {
+        val bytes = 1100L * 1024L * 1024L
+
+        val formatted = formatMegabytes(bytes, Locale.US)
+
+        assertEquals("1.100 MB", formatted)
+    }
+
+    @Test
+    fun formatMegabytes_keepsSingleDecimalBelowHundred() {
+        val bytes = 125L * 1024L * 1024L / 10L // 12.5 MB
+
+        val formatted = formatMegabytes(bytes, Locale.US)
+
+        assertEquals("12.5 MB", formatted)
     }
 
     @Test
