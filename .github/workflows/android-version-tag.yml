@@ -20,11 +20,17 @@ jobs:
           fetch-depth: 0
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
           cache: gradle
+
+      - name: Ensure ProGuard rules file exists
+        run: |
+          if [ ! -f app/proguard-rules.pro ]; then
+            printf '%s\n' '# Release minification rules.' > app/proguard-rules.pro
+          fi
 
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew

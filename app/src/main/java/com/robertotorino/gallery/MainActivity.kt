@@ -8,11 +8,6 @@ import android.content.ContentUris
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
-import java.text.SimpleDateFormat
-import java.util.Calendar
-import java.util.Date
-import java.util.Locale
-import kotlin.let
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
@@ -47,7 +42,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -57,21 +54,19 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.layout.size
-import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.automirrored.filled.RotateRight
-import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.FilterBAndW
 import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Inventory
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
@@ -86,8 +81,12 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.PrimaryTabRow
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -96,22 +95,27 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.core.os.ConfigurationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.exifinterface.media.ExifInterface
@@ -121,22 +125,19 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
-import com.robertotorino.gallery.worker.CleanupWorker
-import com.robertotorino.gallery.ui.theme.AppTheme
-import com.robertotorino.gallery.ui.theme.GalleryTheme
-import java.io.File
-import java.util.concurrent.TimeUnit
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Switch
-import androidx.compose.runtime.rememberCoroutineScope
-import kotlinx.coroutines.launch
-import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.Inventory
-import androidx.compose.runtime.mutableIntStateOf
 import com.robertotorino.gallery.data.GalleryDatabase
 import com.robertotorino.gallery.data.MediaItem
 import com.robertotorino.gallery.repository.MediaRepository
-import androidx.compose.ui.platform.LocalLocale
+import com.robertotorino.gallery.ui.theme.AppTheme
+import com.robertotorino.gallery.ui.theme.GalleryTheme
+import com.robertotorino.gallery.worker.CleanupWorker
+import kotlinx.coroutines.launch
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 fun Context.getActivity(): AppCompatActivity? = when (this) {
     is AppCompatActivity -> this
@@ -158,11 +159,11 @@ fun setAsWallpaper(context: Context, uri: Uri) {
 
 fun getRealPathFromUri(context: Context, uri: Uri): String? {
     val mediaStoreUri = resolveToMediaStoreUri(context, uri)
-    val projection = arrayOf(MediaStore.Images.Media.DATA)
+    val projection = arrayOf(MediaStore.MediaColumns.DATA)
     try {
         context.contentResolver.query(mediaStoreUri, projection, null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
-                val columnIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+                val columnIndex = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
                 if (columnIndex != -1) {
                     return cursor.getString(columnIndex)
                 }
@@ -220,6 +221,35 @@ fun queryImages(context: Context): List<Uri> {
     return uris
 }
 
+fun queryVideos(context: Context): List<Uri> {
+    val uris = mutableListOf<Uri>()
+    val projection = arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DATA)
+    val sortOrder = "${MediaStore.Video.Media.DATE_ADDED} DESC"
+
+    val appFilesDir = context.getExternalFilesDir(null)?.absolutePath
+    var selection: String? = null
+    var selectionArgs: Array<String>? = null
+    if (appFilesDir != null) {
+        selection = "${MediaStore.Video.Media.DATA} NOT LIKE ?"
+        selectionArgs = arrayOf("$appFilesDir%")
+    }
+
+    context.contentResolver.query(
+        MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+        projection,
+        selection,
+        selectionArgs,
+        sortOrder
+    )?.use { cursor ->
+        val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+        while (cursor.moveToNext()) {
+            val id = cursor.getLong(idColumn)
+            uris.add(ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id))
+        }
+    }
+    return uris
+}
+
 fun resolveToMediaStoreUri(context: Context, uri: Uri): Uri {
     if (uri.scheme == "content" && uri.authority == MediaStore.AUTHORITY) {
         return uri
@@ -240,6 +270,30 @@ fun resolveToMediaStoreUri(context: Context, uri: Uri): Uri {
         }
     }
     return uri
+}
+
+fun getUriSizeInBytes(context: Context, uri: Uri): Long {
+    fun querySize(targetUri: Uri): Long? {
+        context.contentResolver.query(
+            targetUri,
+            arrayOf(OpenableColumns.SIZE),
+            null,
+            null,
+            null
+        )?.use { cursor ->
+            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (sizeIndex != -1 && cursor.moveToFirst() && !cursor.isNull(sizeIndex)) {
+                return cursor.getLong(sizeIndex)
+            }
+        }
+        return null
+    }
+
+    return querySize(uri) ?: querySize(resolveToMediaStoreUri(context, uri)) ?: 0L
+}
+
+fun calculateUsedStorageBytes(context: Context, uris: List<Uri>): Long {
+    return uris.sumOf { uri -> getUriSizeInBytes(context, uri) }
 }
 
 class MainActivity : AppCompatActivity() {
@@ -268,6 +322,7 @@ class MainActivity : AppCompatActivity() {
                 var hasPermission by remember {
                     val permissions = listOf(
                         Manifest.permission.READ_MEDIA_IMAGES,
+                        Manifest.permission.READ_MEDIA_VIDEO,
                         Manifest.permission.POST_NOTIFICATIONS
                     )
                     mutableStateOf(
@@ -297,7 +352,7 @@ fun PermissionScreen(onPermissionGranted: () -> Unit) {
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        if (permissions.values.all { it }) {
+        if (areAllPermissionsGranted(permissions)) {
             onPermissionGranted()
         }
     }
@@ -318,7 +373,7 @@ fun PermissionScreen(onPermissionGranted: () -> Unit) {
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
-            text = "A simple app to quickly view your pictures.",
+            text = "A simple app to quickly view your photos and videos.",
             style = MaterialTheme.typography.bodyLarge,
             color = AppTheme.colors.textSecondary,
             textAlign = TextAlign.Center
@@ -333,7 +388,7 @@ fun PermissionScreen(onPermissionGranted: () -> Unit) {
         )
         Spacer(modifier = Modifier.height(16.dp))
         Text(
-            text = "The app needs permissions to access your photos and show notifications.",
+            text = "The app needs permissions to access your photos, videos and show notifications.",
             style = MaterialTheme.typography.bodyLarge,
             color = AppTheme.colors.textSecondary,
             textAlign = TextAlign.Center
@@ -344,6 +399,7 @@ fun PermissionScreen(onPermissionGranted: () -> Unit) {
                 permissionLauncher.launch(
                     arrayOf(
                         Manifest.permission.READ_MEDIA_IMAGES,
+                        Manifest.permission.READ_MEDIA_VIDEO,
                         Manifest.permission.POST_NOTIFICATIONS
                     )
                 )
@@ -425,12 +481,17 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var showRestoreRecycleBinDialog by remember { mutableStateOf(false) }
     var showRestoreArchiveDialog by remember { mutableStateOf(false) }
     var showEmptyRecycleBinDialog by remember { mutableStateOf(false) }
+    var showUsedStorageDialog by remember { mutableStateOf(false) }
+    var usedPictureBytes by remember { mutableStateOf(0L) }
+    var usedVideoBytes by remember { mutableStateOf(0L) }
 
     var showExcludedFoldersDialog by remember { mutableStateOf(false) }
     var showPreExcludeConfirm by remember { mutableStateOf(false) }
     var showPostExcludeConfirm by remember { mutableStateOf(false) }
     var pendingExcludedUri by remember { mutableStateOf<Uri?>(null) }
     var isLoaded by rememberSaveable { mutableStateOf(false) }
+    var selectedMediaTab by rememberSaveable { mutableIntStateOf(0) }
+    var videoUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
 
     // Load images from MediaStore and saved folders
     LaunchedEffect(Unit) {
@@ -442,6 +503,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
 
         val foundUris = queryImages(context)
         selectedImageUris = (foundUris + savedUris).distinct()
+        videoUris = queryVideos(context)
 
         initialUri?.let { uri ->
             val index = selectedImageUris.indexOf(uri)
@@ -483,6 +545,19 @@ fun GalleryScreen(initialUri: Uri? = null) {
             excludedFolders.none { excluded -> path.startsWith(excluded) }
         }
     }
+    val filteredVideoUris = remember(videoUris, excludedFolders) {
+        videoUris.filter { uri ->
+            val path = getRealPathFromUri(context, uri) ?: uri.toString()
+            excludedFolders.none { excluded -> path.startsWith(excluded) }
+        }
+    }
+
+    LaunchedEffect(showUsedStorageDialog, filteredUris, filteredVideoUris) {
+        if (showUsedStorageDialog) {
+            usedPictureBytes = calculateUsedStorageBytes(context, filteredUris)
+            usedVideoBytes = calculateUsedStorageBytes(context, filteredVideoUris)
+        }
+    }
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -520,15 +595,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                     super.onAuthenticationSucceeded(result)
                     if (useRecycleBin) {
                         scope.launch {
-                            var successCount = 0
-                            uris.forEach { uri ->
-                                val item = getMediaItemFromUri(context, uri)
-                                if (item != null) {
-                                    if (repository.moveToRecycleBin(item)) {
-                                        successCount++
-                                    }
-                                }
-                            }
+                            moveToRecycleBinInternal(uris, context, repository)
                             selectedImageUris = selectedImageUris.filterNot { it in uris }
                             checkedUris = checkedUris.filterNot { it in uris }.toSet()
                             Toast.makeText(context, "Picture(s) moved to Recycle Bin", Toast.LENGTH_SHORT).show()
@@ -585,13 +652,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
 
     fun archiveImages(uris: List<Uri>) {
         scope.launch {
-            val mediaItems = uris.mapNotNull { getMediaItemFromUri(context, it) }
-            var successCount = 0
-            mediaItems.forEach { item ->
-                if (repository.moveToArchive(item)) {
-                    successCount++
-                }
-            }
+            archiveImagesInternal(uris, context, repository)
             selectedImageUris = selectedImageUris.filterNot { it in uris }
             checkedUris = checkedUris.filterNot { it in uris }.toSet()
             Toast.makeText(context, "Picture(s) moved to Archive", Toast.LENGTH_SHORT).show()
@@ -610,8 +671,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
 
     fun restoreFromArchive() {
         scope.launch {
-            val items = database.recycledItemDao().getAll()
-            items.filter { it.isArchived }.forEach { repository.restoreItem(it) }
+            restoreFromArchiveInternal(database.recycledItemDao(), repository)
             val foundUris = queryImages(context)
             selectedImageUris = (foundUris + selectedImageUris).distinct()
             Toast.makeText(context, "Pictures restored from Archive", Toast.LENGTH_SHORT).show()
@@ -679,8 +739,29 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 .background(AppTheme.colors.background)
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
+                PrimaryTabRow(
+                    selectedTabIndex = selectedMediaTab,
+                    containerColor = AppTheme.colors.background,
+                    contentColor = AppTheme.colors.textPrimary
+                ) {
+                    Tab(
+                        selected = selectedMediaTab == 0,
+                        onClick = { selectedMediaTab = 0 },
+                        text = { Text("Pictures") }
+                    )
+                    Tab(
+                        selected = selectedMediaTab == 1,
+                        onClick = {
+                            selectedMediaTab = 1
+                            checkedUris = emptySet()
+                            selectedImageIndex = null
+                        },
+                        text = { Text("Videos") }
+                    )
+                }
+
                 Text(
-                    text = "Found ${filteredUris.size} pictures.",
+                    text = "Found ${filteredUris.size} pictures and ${filteredVideoUris.size} videos.",
                     modifier = Modifier.padding(16.dp),
                     color = AppTheme.colors.textPrimary,
                     style = MaterialTheme.typography.titleMedium
@@ -691,72 +772,130 @@ fun GalleryScreen(initialUri: Uri? = null) {
                         .weight(1f)
                         .fillMaxWidth()
                         .then(
-                            if (filteredUris.isEmpty()) {
+                            if (selectedMediaTab == 0 && filteredUris.isEmpty()) {
                                 Modifier.clickable { multiplePhotoPickerLauncher.launch(arrayOf("image/*")) }
                             } else Modifier
                         )
                 ) {
-                    if (filteredUris.isEmpty()) {
-                        Text(
-                            text = "Tap anywhere to choose pictures.",
-                            modifier = Modifier.align(Alignment.Center),
-                            color = AppTheme.colors.textSecondary
-                        )
-                    } else {
-                        LazyVerticalGrid(
-                            columns = GridCells.Fixed(3),
-                            modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(
-                                start = 4.dp,
-                                end = 4.dp,
-                                top = 4.dp,
-                                bottom = 80.dp
+                    if (selectedMediaTab == 0) {
+                        if (filteredUris.isEmpty()) {
+                            Text(
+                                text = "Tap anywhere to choose pictures.",
+                                modifier = Modifier.align(Alignment.Center),
+                                color = AppTheme.colors.textSecondary
                             )
-                        ) {
-                            itemsIndexed(filteredUris) { index, uri ->
-                                val isChecked = uri in checkedUris
-                                Box(
-                                    modifier = Modifier
-                                        .padding(4.dp)
-                                        .aspectRatio(1f)
-                                        .clip(RoundedCornerShape(12.dp))
-                                        .background(AppTheme.colors.cardBackground)
-                                        .combinedClickable(
-                                            onClick = {
-                                                if (checkedUris.isNotEmpty()) {
+                        } else {
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(3),
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(
+                                    start = 4.dp,
+                                    end = 4.dp,
+                                    top = 4.dp,
+                                    bottom = 80.dp
+                                )
+                            ) {
+                                itemsIndexed(filteredUris) { index, uri ->
+                                    val isChecked = uri in checkedUris
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(4.dp)
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(AppTheme.colors.cardBackground)
+                                            .combinedClickable(
+                                                onClick = {
+                                                    if (checkedUris.isNotEmpty()) {
+                                                        checkedUris =
+                                                            if (isChecked) checkedUris - uri else checkedUris + uri
+                                                    } else {
+                                                        selectedImageIndex = index
+                                                    }
+                                                },
+                                                onLongClick = {
                                                     checkedUris =
                                                         if (isChecked) checkedUris - uri else checkedUris + uri
-                                                } else {
-                                                    selectedImageIndex = index
                                                 }
-                                            },
-                                            onLongClick = {
-                                                checkedUris =
-                                                    if (isChecked) checkedUris - uri else checkedUris + uri
-                                            }
+                                            )
+                                    ) {
+                                        AsyncImage(
+                                            model = ImageRequest.Builder(LocalContext.current)
+                                                .data(uri)
+                                                .size(300) // Optimization: Target size for grid thumbnails
+                                                .crossfade(true)
+                                                .build(),
+                                            contentDescription = "Selected Picture",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop
                                         )
-                                ) {
-                                    AsyncImage(
-                                        model = ImageRequest.Builder(LocalContext.current)
-                                            .data(uri)
-                                            .size(300) // Optimization: Target size for grid thumbnails
-                                            .crossfade(true)
-                                            .build(),
-                                        contentDescription = "Selected Picture",
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                    if (checkedUris.isNotEmpty()) {
-                                        Icon(
-                                            imageVector = if (isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
-                                            contentDescription = null,
-                                            tint = if (isChecked) AppTheme.colors.accent else Color.White.copy(
-                                                alpha = 0.5f
-                                            ),
-                                            modifier = Modifier
-                                                .align(Alignment.TopEnd)
-                                                .padding(4.dp)
-                                                .size(24.dp)
+                                        if (checkedUris.isNotEmpty()) {
+                                            Icon(
+                                                imageVector = if (isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                                contentDescription = null,
+                                                tint = if (isChecked) AppTheme.colors.accent else Color.White.copy(
+                                                    alpha = 0.5f
+                                                ),
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(4.dp)
+                                                    .size(24.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        if (filteredVideoUris.isEmpty()) {
+                            Text(
+                                text = "No videos found.",
+                                modifier = Modifier.align(Alignment.Center),
+                                color = AppTheme.colors.textSecondary
+                            )
+                        } else {
+                            LazyVerticalGrid(
+                                columns = GridCells.Fixed(3),
+                                modifier = Modifier.fillMaxSize(),
+                                contentPadding = PaddingValues(
+                                    start = 4.dp,
+                                    end = 4.dp,
+                                    top = 4.dp,
+                                    bottom = 80.dp
+                                )
+                            ) {
+                                itemsIndexed(filteredVideoUris) { _, uri ->
+                                    Box(
+                                        modifier = Modifier
+                                            .padding(4.dp)
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(AppTheme.colors.cardBackground)
+                                            .clickable {
+                                                try {
+                                                    context.startActivity(
+                                                        Intent(Intent.ACTION_VIEW).apply {
+                                                            setDataAndType(uri, "video/*")
+                                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                        }
+                                                    )
+                                                } catch (e: Exception) {
+                                                    Toast.makeText(
+                                                        context,
+                                                        "Could not open video: ${e.message}",
+                                                        Toast.LENGTH_SHORT
+                                                    ).show()
+                                                }
+                                            }
+                                    ) {
+                                        AsyncImage(
+                                            model = ImageRequest.Builder(LocalContext.current)
+                                                .data(uri)
+                                                .size(300)
+                                                .crossfade(true)
+                                                .build(),
+                                            contentDescription = "Selected Video",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Crop
                                         )
                                     }
                                 }
@@ -766,7 +905,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 }
             }
 
-            if (checkedUris.isNotEmpty()) {
+            if (selectedMediaTab == 0 && checkedUris.isNotEmpty()) {
                 Surface(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -869,204 +1008,210 @@ fun GalleryScreen(initialUri: Uri? = null) {
         }
     }
 
-    selectedImageIndex?.let { initialIndex ->
-        Dialog(
-            onDismissRequest = { selectedImageIndex = null },
-            properties = DialogProperties(
-                usePlatformDefaultWidth = false,
-                decorFitsSystemWindows = false
-            )
-        ) {
-            val pagerState =
-                rememberPagerState(initialPage = initialIndex, pageCount = { filteredUris.size })
-            var isImageZoomed by remember { mutableStateOf(false) }
-            var systemBarsVisible by remember { mutableStateOf(true) }
-            val activity = LocalContext.current.getActivity()
-
-            LaunchedEffect(systemBarsVisible) {
-                activity?.window?.let { window ->
-                    val controller = WindowInsetsControllerCompat(window, window.decorView)
-                    if (systemBarsVisible) {
-                        controller.show(WindowInsetsCompat.Type.systemBars())
-                    } else {
-                        controller.hide(WindowInsetsCompat.Type.systemBars())
-                        controller.systemBarsBehavior =
-                            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                    }
-                }
-            }
-
-            DisposableEffect(Unit) {
-                onDispose {
-                    activity?.window?.let { window ->
-                        WindowInsetsControllerCompat(window, window.decorView).show(
-                            WindowInsetsCompat.Type.systemBars()
-                        )
-                    }
-                }
-            }
-
-            val currentUri = filteredUris.getOrNull(pagerState.currentPage)
-            val currentEditState = currentUri?.let { imageEdits[it] } ?: EditState()
-
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black)
-                    .clickable { systemBarsVisible = !systemBarsVisible }
+    if (selectedMediaTab == 0) {
+        selectedImageIndex?.let { initialIndex ->
+            Dialog(
+                onDismissRequest = { selectedImageIndex = null },
+                properties = DialogProperties(
+                    usePlatformDefaultWidth = false,
+                    decorFitsSystemWindows = false
+                )
             ) {
-                HorizontalPager(
-                    state = pagerState,
-                    userScrollEnabled = !isImageZoomed,
-                    modifier = Modifier.fillMaxSize()
-                ) { page ->
-                    val uri = filteredUris[page]
-                    val editState = imageEdits[uri] ?: EditState()
-                    ZoomableImage(
-                        model = uri,
-                        contentDescription = "Full Screen Image",
-                        rotation = editState.rotation,
-                        flipHorizontal = editState.flipHorizontal,
-                        flipVertical = editState.flipVertical,
-                        isCropped = editState.isCropped,
-                        isGrayscale = editState.isGrayscale,
-                        onZoomStateChanged = { isZoomed -> isImageZoomed = isZoomed },
-                        onTap = { systemBarsVisible = !systemBarsVisible }
-                    )
+                val pagerState =
+                    rememberPagerState(initialPage = initialIndex, pageCount = { filteredUris.size })
+                var isImageZoomed by remember { mutableStateOf(false) }
+                var systemBarsVisible by remember { mutableStateOf(true) }
+                val activity = LocalContext.current.getActivity()
+
+                LaunchedEffect(pagerState.currentPage) {
+                    selectedImageIndex = pagerState.currentPage
                 }
 
-                if (systemBarsVisible) {
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(horizontal = 24.dp)
-                            .padding(bottom = 12.dp)
-                            .navigationBarsPadding()
-                            .fillMaxWidth(0.95f)
-                            .height(48.dp),
-                        shape = RoundedCornerShape(24.dp),
-                        color = Color.Transparent,
-                        tonalElevation = 0.dp
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 8.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            IconButton(onClick = {
-                                currentUri?.let { uri ->
-                                    imageEdits =
-                                        imageEdits + (uri to currentEditState.copy(rotation = currentEditState.rotation - 90f))
-                                }
-                            }) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.RotateLeft,
-                                    "Rotate Anti-clockwise",
-                                    tint = AppTheme.colors.boxText,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
-                            IconButton(onClick = {
-                                currentUri?.let { uri ->
-                                    imageEdits =
-                                        imageEdits + (uri to currentEditState.copy(rotation = currentEditState.rotation + 90f))
-                                }
-                            }) {
-                                Icon(
-                                    Icons.AutoMirrored.Filled.RotateRight,
-                                    "Rotate Clockwise",
-                                    tint = AppTheme.colors.boxText,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
-                            IconButton(onClick = {
-                                currentUri?.let { uri ->
-                                    imageEdits =
-                                        imageEdits + (uri to currentEditState.copy(flipHorizontal = !currentEditState.flipHorizontal))
-                                }
-                            }) {
-                                Icon(
-                                    Icons.Default.SwapHoriz,
-                                    "Flip Horizontal",
-                                    tint = AppTheme.colors.boxText,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
-                            IconButton(onClick = {
-                                currentUri?.let { uri ->
-                                    imageEdits =
-                                        imageEdits + (uri to currentEditState.copy(flipVertical = !currentEditState.flipVertical))
-                                }
-                            }) {
-                                Icon(
-                                    Icons.Default.SwapVert,
-                                    "Flip Vertical",
-                                    tint = AppTheme.colors.boxText,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
-                            IconButton(onClick = {
-                                currentUri?.let { uri ->
-                                    imageEdits =
-                                        imageEdits + (uri to currentEditState.copy(isGrayscale = !currentEditState.isGrayscale))
-                                }
-                            }) {
-                                Icon(
-                                    Icons.Default.FilterBAndW,
-                                    "Black and White",
-                                    tint = if (currentEditState.isGrayscale) AppTheme.colors.accent else AppTheme.colors.boxText,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
-                            IconButton(onClick = { showMetadataDialog = true }) {
-                                Icon(
-                                    Icons.Default.Info,
-                                    "Metadata",
-                                    tint = AppTheme.colors.boxText,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
-                            IconButton(onClick = {
-                                currentUri?.let { uri ->
-                                    urisToArchive = listOf(uri)
-                                    showArchiveDialog = true
-                                }
-                            }) {
-                                Icon(
-                                    Icons.Default.Inventory,
-                                    "Archive",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
-                            IconButton(onClick = {
-                                urisToDelete = listOf(currentUri!!); showDeleteDialog = true
-                            }) {
-                                Icon(
-                                    Icons.Default.Delete,
-                                    "Delete",
-                                    tint = AppTheme.colors.boxText,
-                                    modifier = Modifier.size(28.dp)
-                                )
-                            }
+                LaunchedEffect(systemBarsVisible) {
+                    activity?.window?.let { window ->
+                        val controller = WindowInsetsControllerCompat(window, window.decorView)
+                        if (systemBarsVisible) {
+                            controller.show(WindowInsetsCompat.Type.systemBars())
+                        } else {
+                            controller.hide(WindowInsetsCompat.Type.systemBars())
+                            controller.systemBarsBehavior =
+                                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
                         }
                     }
+                }
 
-                    Text(
-                        text = "${pagerState.currentPage + 1} / ${filteredUris.size}",
-                        color = AppTheme.colors.textPrimary,
-                        style = MaterialTheme.typography.bodyLarge,
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(top = 40.dp)
-                            .background(
-                                AppTheme.colors.cardBackground.copy(alpha = 0.5f),
-                                RoundedCornerShape(8.dp)
+                DisposableEffect(Unit) {
+                    onDispose {
+                        activity?.window?.let { window ->
+                            WindowInsetsControllerCompat(window, window.decorView).show(
+                                WindowInsetsCompat.Type.systemBars()
                             )
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
-                    )
+                        }
+                    }
+                }
+
+                val currentUri = filteredUris.getOrNull(pagerState.currentPage)
+                val currentEditState = currentUri?.let { imageEdits[it] } ?: EditState()
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black)
+                        .clickable { systemBarsVisible = !systemBarsVisible }
+                ) {
+                    HorizontalPager(
+                        state = pagerState,
+                        userScrollEnabled = !isImageZoomed,
+                        modifier = Modifier.fillMaxSize()
+                    ) { page ->
+                        val uri = filteredUris[page]
+                        val editState = imageEdits[uri] ?: EditState()
+                        ZoomableImage(
+                            model = uri,
+                            contentDescription = "Full Screen Image",
+                            rotation = editState.rotation,
+                            flipHorizontal = editState.flipHorizontal,
+                            flipVertical = editState.flipVertical,
+                            isCropped = editState.isCropped,
+                            isGrayscale = editState.isGrayscale,
+                            onZoomStateChanged = { isZoomed -> isImageZoomed = isZoomed },
+                            onTap = { systemBarsVisible = !systemBarsVisible }
+                        )
+                    }
+
+                    if (systemBarsVisible) {
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 24.dp)
+                                .padding(bottom = 12.dp)
+                                .navigationBarsPadding()
+                                .fillMaxWidth(0.95f)
+                                .height(48.dp),
+                            shape = RoundedCornerShape(24.dp),
+                            color = Color.Transparent,
+                            tonalElevation = 0.dp
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                IconButton(onClick = {
+                                    currentUri?.let { uri ->
+                                        imageEdits =
+                                            imageEdits + (uri to currentEditState.copy(rotation = currentEditState.rotation - 90f))
+                                    }
+                                }) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.RotateLeft,
+                                        "Rotate Anti-clockwise",
+                                        tint = AppTheme.colors.boxText,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                IconButton(onClick = {
+                                    currentUri?.let { uri ->
+                                        imageEdits =
+                                            imageEdits + (uri to currentEditState.copy(rotation = currentEditState.rotation + 90f))
+                                    }
+                                }) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.RotateRight,
+                                        "Rotate Clockwise",
+                                        tint = AppTheme.colors.boxText,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                IconButton(onClick = {
+                                    currentUri?.let { uri ->
+                                        imageEdits =
+                                            imageEdits + (uri to currentEditState.copy(flipHorizontal = !currentEditState.flipHorizontal))
+                                    }
+                                }) {
+                                    Icon(
+                                        Icons.Default.SwapHoriz,
+                                        "Flip Horizontal",
+                                        tint = AppTheme.colors.boxText,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                IconButton(onClick = {
+                                    currentUri?.let { uri ->
+                                        imageEdits =
+                                            imageEdits + (uri to currentEditState.copy(flipVertical = !currentEditState.flipVertical))
+                                    }
+                                }) {
+                                    Icon(
+                                        Icons.Default.SwapVert,
+                                        "Flip Vertical",
+                                        tint = AppTheme.colors.boxText,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                IconButton(onClick = {
+                                    currentUri?.let { uri ->
+                                        imageEdits =
+                                            imageEdits + (uri to currentEditState.copy(isGrayscale = !currentEditState.isGrayscale))
+                                    }
+                                }) {
+                                    Icon(
+                                        Icons.Default.FilterBAndW,
+                                        "Black and White",
+                                        tint = if (currentEditState.isGrayscale) AppTheme.colors.accent else AppTheme.colors.boxText,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                IconButton(onClick = { showMetadataDialog = true }) {
+                                    Icon(
+                                        Icons.Default.Info,
+                                        "Metadata",
+                                        tint = AppTheme.colors.boxText,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                IconButton(onClick = {
+                                    currentUri?.let { uri ->
+                                        urisToArchive = listOf(uri)
+                                        showArchiveDialog = true
+                                    }
+                                }) {
+                                    Icon(
+                                        Icons.Default.Inventory,
+                                        "Archive",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                                IconButton(onClick = {
+                                    urisToDelete = listOf(currentUri!!); showDeleteDialog = true
+                                }) {
+                                    Icon(
+                                        Icons.Default.Delete,
+                                        "Delete",
+                                        tint = AppTheme.colors.boxText,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        Text(
+                            text = "${pagerState.currentPage + 1} / ${filteredUris.size}",
+                            color = AppTheme.colors.textPrimary,
+                            style = MaterialTheme.typography.bodyLarge,
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = 40.dp)
+                                .background(
+                                    AppTheme.colors.cardBackground.copy(alpha = 0.5f),
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
                 }
             }
         }
@@ -1093,7 +1238,8 @@ fun GalleryScreen(initialUri: Uri? = null) {
             },
             onAbout = { showSettingsMenu = false; showAboutDialog = true },
             onRecycleBin = { showSettingsMenu = false; showRecycleBinSettings = true },
-            onArchive = { showSettingsMenu = false; showArchiveSettings = true }
+            onArchive = { showSettingsMenu = false; showArchiveSettings = true },
+            onUsedStorage = { showSettingsMenu = false; showUsedStorageDialog = true }
         )
     }
 
@@ -1333,6 +1479,14 @@ fun GalleryScreen(initialUri: Uri? = null) {
         AboutDialog(onDismiss = { showAboutDialog = false })
     }
 
+    if (showUsedStorageDialog) {
+        UsedStorageDialog(
+            pictureBytes = usedPictureBytes,
+            videoBytes = usedVideoBytes,
+            onDismiss = { showUsedStorageDialog = false }
+        )
+    }
+
     if (showWallpaperConfirm) {
         AlertDialog(
             onDismissRequest = { showWallpaperConfirm = false; pendingWallpaperUri = null },
@@ -1376,7 +1530,8 @@ fun SettingsDialog(
     onSetAsDefault: () -> Unit,
     onAbout: () -> Unit,
     onRecycleBin: () -> Unit,
-    onArchive: () -> Unit
+    onArchive: () -> Unit,
+    onUsedStorage: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -1500,6 +1655,27 @@ fun SettingsDialog(
                     }
                 }
                 TextButton(
+                    onClick = onUsedStorage,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Inventory,
+                            contentDescription = null,
+                            tint = AppTheme.colors.textPrimary
+                        )
+                        Spacer(Modifier.width(12.dp)); Text(
+                        "Used storage",
+                        color = AppTheme.colors.textPrimary
+                    )
+                    }
+                }
+
+                TextButton(
                     onClick = onAbout,
                     modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(12.dp)
@@ -1527,6 +1703,45 @@ fun SettingsDialog(
             }
         }
     }
+}
+
+@Composable
+fun UsedStorageDialog(
+    pictureBytes: Long,
+    videoBytes: Long,
+    onDismiss: () -> Unit
+) {
+    val locale = ConfigurationCompat.getLocales(LocalConfiguration.current).get(0) ?: Locale.ROOT
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "Used storage",
+                color = AppTheme.colors.textPrimary,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column {
+                Text(
+                    "Pictures: ${String.format(locale, "%,d bytes", pictureBytes)}",
+                    color = AppTheme.colors.textSecondary
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Videos: ${String.format(locale, "%,d bytes", videoBytes)}",
+                    color = AppTheme.colors.textSecondary
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = AppTheme.colors.accent)
+            }
+        },
+        containerColor = AppTheme.colors.background
+    )
 }
 
 @Composable
@@ -1757,7 +1972,7 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
         MediaStore.Images.Media.MIME_TYPE,
         MediaStore.Images.Media.DATE_ADDED
     )
-    
+
     var mediaItem: MediaItem? = null
     try {
         context.contentResolver.query(mediaStoreUri, projection, null, null, null)?.use { cursor ->
@@ -1784,7 +1999,7 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
             }
         } catch (_: Exception) {}
     }
-    
+
     return mediaItem
 }
 
