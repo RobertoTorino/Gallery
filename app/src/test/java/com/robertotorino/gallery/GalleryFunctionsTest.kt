@@ -74,6 +74,10 @@ class GalleryFunctionsTest {
         val pickerUri = mockk<Uri>()
         val resolvedUri = mockk<Uri>()
         every { Uri.parse("content://com.android.providers.media.photopicker/media/321") } returns pickerUri
+        every { pickerUri.scheme } returns "content"
+        every { pickerUri.authority } returns "com.android.providers.media.photopicker"
+        every { pickerUri.toString() } returns "content://com.android.providers.media.photopicker/media/321"
+        every { pickerUri.lastPathSegment } returns "321"
         every { ContentUris.withAppendedId(any(), 321L) } returns resolvedUri
 
         val context = mockk<Context>()

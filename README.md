@@ -1,6 +1,6 @@
 # Gallery 
 
-### A simple Android image viewer.
+### A simple Android image and video viewer.
 
 
 ### ADB

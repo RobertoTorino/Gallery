@@ -61,6 +61,7 @@ import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterBAndW
 import androidx.compose.material.icons.filled.FolderOff
@@ -73,6 +74,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material.icons.filled.Wallpaper
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -119,6 +121,9 @@ import androidx.core.os.ConfigurationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.exifinterface.media.ExifInterface
+import androidx.media3.common.MediaItem as ExoMediaItem
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.ui.PlayerView
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
@@ -294,6 +299,31 @@ fun getUriSizeInBytes(context: Context, uri: Uri): Long {
 
 fun calculateUsedStorageBytes(context: Context, uris: List<Uri>): Long {
     return uris.sumOf { uri -> getUriSizeInBytes(context, uri) }
+}
+
+fun getVideoThumbnailBitmap(context: Context, uri: Uri): android.graphics.Bitmap? {
+    val mediaStoreUri = resolveToMediaStoreUri(context, uri)
+    val id = mediaStoreUri.lastPathSegment?.toLongOrNull() ?: return null
+    return try {
+        MediaStore.Video.Thumbnails.getThumbnail(
+            context.contentResolver,
+            id,
+            MediaStore.Video.Thumbnails.MINI_KIND,
+            null
+        )
+    } catch (_: Exception) {
+        null
+    }
+}
+
+fun formatMegabytes(bytes: Long, locale: Locale = Locale.getDefault()): String {
+    if (bytes <= 0L) return "0.0 MB"
+    val megabytes = bytes.toDouble() / (1024.0 * 1024.0)
+    return if (megabytes >= 100.0) {
+        String.format(locale, "%.0f MB", megabytes)
+    } else {
+        String.format(locale, "%.1f MB", megabytes)
+    }
 }
 
 class MainActivity : AppCompatActivity() {
@@ -484,6 +514,8 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var showUsedStorageDialog by remember { mutableStateOf(false) }
     var usedPictureBytes by remember { mutableStateOf(0L) }
     var usedVideoBytes by remember { mutableStateOf(0L) }
+    var selectedVideoUri by remember { mutableStateOf<Uri?>(null) }
+    var showVideoPlayer by remember { mutableStateOf(false) }
 
     var showExcludedFoldersDialog by remember { mutableStateOf(false) }
     var showPreExcludeConfirm by remember { mutableStateOf(false) }
@@ -864,6 +896,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                 )
                             ) {
                                 itemsIndexed(filteredVideoUris) { _, uri ->
+                                    val videoThumbnail = remember(uri) { getVideoThumbnailBitmap(context, uri) }
                                     Box(
                                         modifier = Modifier
                                             .padding(4.dp)
@@ -871,32 +904,32 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                             .clip(RoundedCornerShape(12.dp))
                                             .background(AppTheme.colors.cardBackground)
                                             .clickable {
-                                                try {
-                                                    context.startActivity(
-                                                        Intent(Intent.ACTION_VIEW).apply {
-                                                            setDataAndType(uri, "video/*")
-                                                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                                        }
-                                                    )
-                                                } catch (e: Exception) {
-                                                    Toast.makeText(
-                                                        context,
-                                                        "Could not open video: ${e.message}",
-                                                        Toast.LENGTH_SHORT
-                                                    ).show()
-                                                }
+                                                selectedVideoUri = uri
+                                                showVideoPlayer = true
                                             }
                                     ) {
-                                        AsyncImage(
-                                            model = ImageRequest.Builder(LocalContext.current)
-                                                .data(uri)
-                                                .size(300)
-                                                .crossfade(true)
-                                                .build(),
-                                            contentDescription = "Selected Video",
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentScale = ContentScale.Crop
-                                        )
+                                        if (videoThumbnail != null) {
+                                            AsyncImage(
+                                                model = videoThumbnail,
+                                                contentDescription = "Selected Video",
+                                                modifier = Modifier.fillMaxSize(),
+                                                contentScale = ContentScale.Crop
+                                            )
+                                        } else {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxSize()
+                                                    .background(AppTheme.colors.cardBackground),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Fullscreen,
+                                                    contentDescription = null,
+                                                    tint = AppTheme.colors.accent,
+                                                    modifier = Modifier.size(32.dp)
+                                                )
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1089,8 +1122,8 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                 .fillMaxWidth(0.95f)
                                 .height(48.dp),
                             shape = RoundedCornerShape(24.dp),
-                            color = Color.Transparent,
-                            tonalElevation = 0.dp
+                            color = AppTheme.colors.cardBackground.copy(alpha = 0.75f),
+                            tonalElevation = 8.dp
                         ) {
                             Row(
                                 modifier = Modifier
@@ -1179,9 +1212,9 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                     }
                                 }) {
                                     Icon(
-                                        Icons.Default.Inventory,
+                                        Icons.Default.Archive,
                                         "Archive",
-                                        tint = Color.White,
+                                        tint = AppTheme.colors.boxText,
                                         modifier = Modifier.size(28.dp)
                                     )
                                 }
@@ -1228,6 +1261,15 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 }
                 context.startActivity(intent)
             },
+            onCloudMediaAccess = {
+                showSettingsMenu = false
+                val intent = Intent(Settings.ACTION_PRIVACY_SETTINGS)
+                try {
+                    context.startActivity(intent)
+                } catch (_: Exception) {
+                    context.startActivity(Intent(Settings.ACTION_SETTINGS))
+                }
+            },
             onSetAsDefault = {
                 showSettingsMenu = false
                 try {
@@ -1240,6 +1282,16 @@ fun GalleryScreen(initialUri: Uri? = null) {
             onRecycleBin = { showSettingsMenu = false; showRecycleBinSettings = true },
             onArchive = { showSettingsMenu = false; showArchiveSettings = true },
             onUsedStorage = { showSettingsMenu = false; showUsedStorageDialog = true }
+        )
+    }
+
+    if (showVideoPlayer && selectedVideoUri != null) {
+        VideoPlayerDialog(
+            uri = selectedVideoUri!!,
+            onDismiss = {
+                showVideoPlayer = false
+                selectedVideoUri = null
+            }
         )
     }
 
@@ -1527,6 +1579,7 @@ fun SettingsDialog(
     onDismiss: () -> Unit,
     onExcludeFolders: () -> Unit,
     onManagePermissions: () -> Unit,
+    onCloudMediaAccess: () -> Unit,
     onSetAsDefault: () -> Unit,
     onAbout: () -> Unit,
     onRecycleBin: () -> Unit,
@@ -1635,6 +1688,26 @@ fun SettingsDialog(
                     }
                 }
                 TextButton(
+                    onClick = onCloudMediaAccess,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Security,
+                            contentDescription = null,
+                            tint = AppTheme.colors.textPrimary
+                        )
+                        Spacer(Modifier.width(12.dp)); Text(
+                        "Cloud media access",
+                        color = AppTheme.colors.textPrimary
+                    )
+                    }
+                }
+                TextButton(
                     onClick = onSetAsDefault,
                     modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(12.dp)
@@ -1725,12 +1798,12 @@ fun UsedStorageDialog(
         text = {
             Column {
                 Text(
-                    "Pictures: ${String.format(locale, "%,d bytes", pictureBytes)}",
+                    "Pictures: ${formatMegabytes(pictureBytes, locale)}",
                     color = AppTheme.colors.textSecondary
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    "Videos: ${String.format(locale, "%,d bytes", videoBytes)}",
+                    "Videos: ${formatMegabytes(videoBytes, locale)}",
                     color = AppTheme.colors.textSecondary
                 )
             }
@@ -1742,6 +1815,62 @@ fun UsedStorageDialog(
         },
         containerColor = AppTheme.colors.background
     )
+}
+
+@Composable
+fun VideoPlayerDialog(
+    uri: Uri,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val player = remember(context, uri) {
+        ExoPlayer.Builder(context).build().apply {
+            setMediaItem(ExoMediaItem.fromUri(uri))
+            prepare()
+            playWhenReady = true
+        }
+    }
+
+    DisposableEffect(player) {
+        onDispose { player.release() }
+    }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+        ) {
+            AndroidView(
+                factory = { ctx ->
+                    PlayerView(ctx).apply {
+                        this.player = player
+                        useController = true
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(16.dp)
+            ) {
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Close video",
+                    tint = Color.White
+                )
+            }
+        }
+    }
 }
 
 @Composable
