@@ -37,6 +37,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -1341,20 +1342,21 @@ fun GalleryScreen(initialUri: Uri? = null) {
                         Surface(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
-                                .padding(horizontal = 8.dp)
+                                .padding(horizontal = 4.dp)
                                 .padding(bottom = 12.dp)
                                 .navigationBarsPadding()
                                 .fillMaxWidth()
-                                .height(48.dp),
-                            shape = RoundedCornerShape(24.dp),
-                            color = Color.Transparent,
-                            tonalElevation = 0.dp
+                                .height(56.dp),
+                            shape = RoundedCornerShape(28.dp),
+                            color = AppTheme.colors.cardBackground.copy(alpha = 0.9f),
+                            tonalElevation = 4.dp
                         ) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 8.dp),
-                                horizontalArrangement = Arrangement.SpaceEvenly,
+                                    .horizontalScroll(rememberScrollState())
+                                    .padding(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 IconButton(onClick = {
