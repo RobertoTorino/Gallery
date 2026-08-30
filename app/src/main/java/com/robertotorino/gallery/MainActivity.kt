@@ -1092,6 +1092,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                 )
                             ) {
                                 itemsIndexed(filteredVideoUris) { _, uri ->
+                                    val isChecked = uri in checkedUris
                                     val videoThumbnail = remember(uri) { getVideoThumbnailBitmap(context, uri) }
                                     Box(
                                         modifier = Modifier
@@ -1099,11 +1100,22 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                             .aspectRatio(1f)
                                             .clip(RoundedCornerShape(12.dp))
                                             .background(AppTheme.colors.cardBackground)
-                                            .clickable {
-                                                selectedVideoUri = uri
-                                                showVideoPlayer = true
-                                                showVideoMetadataDialog = false
-                                            }
+                                            .combinedClickable(
+                                                onClick = {
+                                                    if (checkedUris.isNotEmpty()) {
+                                                        checkedUris =
+                                                            if (isChecked) checkedUris - uri else checkedUris + uri
+                                                    } else {
+                                                        selectedVideoUri = uri
+                                                        showVideoPlayer = true
+                                                        showVideoMetadataDialog = false
+                                                    }
+                                                },
+                                                onLongClick = {
+                                                    checkedUris =
+                                                        if (isChecked) checkedUris - uri else checkedUris + uri
+                                                }
+                                            )
                                     ) {
                                         if (videoThumbnail != null) {
                                             AsyncImage(
@@ -1127,6 +1139,19 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                                 )
                                             }
                                         }
+                                        if (checkedUris.isNotEmpty()) {
+                                            Icon(
+                                                imageVector = if (isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                                contentDescription = null,
+                                                tint = if (isChecked) AppTheme.colors.accent else Color.White.copy(
+                                                    alpha = 0.5f
+                                                ),
+                                                modifier = Modifier
+                                                    .align(Alignment.TopEnd)
+                                                    .padding(4.dp)
+                                                    .size(24.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }
@@ -1135,7 +1160,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 }
             }
 
-            if (selectedMediaTab == 0 && checkedUris.isNotEmpty()) {
+            if (checkedUris.isNotEmpty()) {
                 Surface(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -1156,21 +1181,23 @@ fun GalleryScreen(initialUri: Uri? = null) {
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        IconButton(onClick = {
-                            val firstSelected = checkedUris.firstOrNull()
-                            selectedImageIndex =
-                                filteredUris.indexOf(firstSelected).takeIf { it != -1 }
-                        }) {
-                            Icon(
-                                Icons.Default.Fullscreen,
-                                contentDescription = "View Selected",
-                                tint = AppTheme.colors.textPrimary,
-                                modifier = Modifier.size(28.dp)
-                            )
+                        if (selectedMediaTab == 0) {
+                            IconButton(onClick = {
+                                val firstSelected = checkedUris.firstOrNull()
+                                selectedImageIndex =
+                                    filteredUris.indexOf(firstSelected).takeIf { it != -1 }
+                            }) {
+                                Icon(
+                                    Icons.Default.Fullscreen,
+                                    contentDescription = "View Selected",
+                                    tint = AppTheme.colors.textPrimary,
+                                    modifier = Modifier.size(28.dp)
+                                )
+                            }
                         }
                         IconButton(onClick = {
                             val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                                type = "image/*"
+                                type = if (selectedMediaTab == 0) "image/*" else "video/*"
                                 putParcelableArrayListExtra(
                                     Intent.EXTRA_STREAM,
                                     ArrayList(checkedUris.toList())
@@ -1180,7 +1207,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                             context.startActivity(
                                 Intent.createChooser(
                                     intent,
-                                    "Share selected images"
+                                    if (selectedMediaTab == 0) "Share selected images" else "Share selected videos"
                                 )
                             )
                         }) {
@@ -1191,7 +1218,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                 modifier = Modifier.size(28.dp)
                             )
                         }
-                        if (checkedUris.size == 1) {
+                        if (selectedMediaTab == 0 && checkedUris.size == 1) {
                             IconButton(onClick = {
                                 pendingWallpaperUri = checkedUris.first()
                                 showWallpaperConfirm = true
@@ -1215,7 +1242,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                             )
                         }
                         IconButton(onClick = {
-                            deleteMediaType = DeleteMediaType.PICTURES
+                            deleteMediaType = if (selectedMediaTab == 0) DeleteMediaType.PICTURES else DeleteMediaType.VIDEOS
                             urisToDelete = checkedUris.toList(); showDeleteDialog = true
                         }) {
                             Icon(
