@@ -54,7 +54,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -229,9 +231,17 @@ fun openManagedFolderInPicker(context: Context, folderName: String) {
     }
 }
 
-fun queryImages(context: Context): List<Uri> {
-    val uris = mutableListOf<Uri>()
-    val projection = arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DATA)
+fun queryImages(context: Context): List<MediaItem> {
+    val items = mutableListOf<MediaItem>()
+    val projection = arrayOf(
+        MediaStore.Images.Media._ID,
+        MediaStore.Images.Media.DATA,
+        MediaStore.Images.Media.DISPLAY_NAME,
+        MediaStore.Images.Media.SIZE,
+        MediaStore.Images.Media.MIME_TYPE,
+        MediaStore.Images.Media.DATE_ADDED,
+        MediaStore.Images.Media.DATE_TAKEN
+    )
     val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
 
     val appFilesDir = context.getExternalFilesDir(null)?.absolutePath
@@ -250,17 +260,40 @@ fun queryImages(context: Context): List<Uri> {
         sortOrder
     )?.use { cursor ->
         val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+        val dataColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
+        val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
+        val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.SIZE)
+        val mimeColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.MIME_TYPE)
+        val addedColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+        val takenColumn = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
+
         while (cursor.moveToNext()) {
             val id = cursor.getLong(idColumn)
-            uris.add(ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id))
+            val uri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+            val path = cursor.getString(dataColumn)
+            val name = cursor.getString(nameColumn)
+            val size = cursor.getLong(sizeColumn)
+            val mime = cursor.getString(mimeColumn)
+            val added = cursor.getLong(addedColumn)
+            val takenRaw = cursor.getLong(takenColumn)
+            val taken = extractBestDate(context, uri, name, mime, takenRaw)
+            items.add(MediaItem(uri, path, name, size, mime, added, taken))
         }
     }
-    return uris
+    return items
 }
 
-fun queryVideos(context: Context): List<Uri> {
-    val uris = mutableListOf<Uri>()
-    val projection = arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.DATA)
+fun queryVideos(context: Context): List<MediaItem> {
+    val items = mutableListOf<MediaItem>()
+    val projection = arrayOf(
+        MediaStore.Video.Media._ID,
+        MediaStore.Video.Media.DATA,
+        MediaStore.Video.Media.DISPLAY_NAME,
+        MediaStore.Video.Media.SIZE,
+        MediaStore.Video.Media.MIME_TYPE,
+        MediaStore.Video.Media.DATE_ADDED,
+        MediaStore.Video.Media.DATE_TAKEN
+    )
     val sortOrder = "${MediaStore.Video.Media.DATE_ADDED} DESC"
 
     val appFilesDir = context.getExternalFilesDir(null)?.absolutePath
@@ -279,12 +312,27 @@ fun queryVideos(context: Context): List<Uri> {
         sortOrder
     )?.use { cursor ->
         val idColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+        val dataColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)
+        val nameColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+        val sizeColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
+        val mimeColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.MIME_TYPE)
+        val addedColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
+        val takenColumn = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_TAKEN)
+
         while (cursor.moveToNext()) {
             val id = cursor.getLong(idColumn)
-            uris.add(ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id))
+            val uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)
+            val path = cursor.getString(dataColumn)
+            val name = cursor.getString(nameColumn)
+            val size = cursor.getLong(sizeColumn)
+            val mime = cursor.getString(mimeColumn)
+            val added = cursor.getLong(addedColumn)
+            val takenRaw = cursor.getLong(takenColumn)
+            val taken = extractBestDate(context, uri, name, mime, takenRaw)
+            items.add(MediaItem(uri, path, name, size, mime, added, taken))
         }
     }
-    return uris
+    return items
 }
 
 fun resolveToMediaStoreUri(context: Context, uri: Uri): Uri {
@@ -585,6 +633,34 @@ data class EditState(
     }
 }
 
+sealed class GalleryItem {
+    data class Header(val dateString: String) : GalleryItem()
+    data class Media(val media: MediaItem) : GalleryItem()
+}
+
+fun groupMediaByDate(items: List<MediaItem>, filterByDate: Boolean): List<GalleryItem> {
+    if (!filterByDate) {
+        return items.map { GalleryItem.Media(it) }
+    }
+
+    val sortedItems = items.sortedWith(compareByDescending<MediaItem> { if (it.dateTaken > 0) it.dateTaken else it.dateAdded * 1000 })
+
+    val grouped = mutableListOf<GalleryItem>()
+    val dateFormat = SimpleDateFormat("EEEE MMMM d yyyy", Locale.US)
+    var currentHeader: String? = null
+
+    sortedItems.forEach { item ->
+        val timestamp = if (item.dateTaken > 0) item.dateTaken else item.dateAdded * 1000
+        val dateString = dateFormat.format(Date(timestamp))
+        if (dateString != currentHeader) {
+            grouped.add(GalleryItem.Header(dateString))
+            currentHeader = dateString
+        }
+        grouped.add(GalleryItem.Media(item))
+    }
+    return grouped
+}
+
 enum class ExclusionMediaType {
     PICTURES,
     VIDEOS
@@ -606,7 +682,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
     val database = remember { GalleryDatabase.getDatabase(context) }
     val repository = remember { MediaRepository(context, database.recycledItemDao()) }
 
-    var selectedImageUris by rememberSaveable { mutableStateOf<List<Uri>>(emptyList()) }
+    var imageItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
     var selectedImageIndex by rememberSaveable { mutableStateOf<Int?>(null) }
     var checkedUris by remember { mutableStateOf(setOf<Uri>()) }
 
@@ -628,9 +704,11 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var useRecycleBin by remember { mutableStateOf(prefs.getBoolean("use_recycle_bin", false)) }
     var recycleBinDays by remember { mutableIntStateOf(prefs.getInt("recycle_bin_days", 30)) }
     var archiveAfter30Days by remember { mutableStateOf(prefs.getBoolean("archive_after_30_days", false)) }
+    var filterByDate by remember { mutableStateOf(prefs.getBoolean("filter_by_date", false)) }
 
     var showRecycleBinSettings by remember { mutableStateOf(false) }
     var showArchiveSettings by remember { mutableStateOf(false) }
+    var showFilterSettings by remember { mutableStateOf(false) }
     var showRestoreRecycleBinDialog by remember { mutableStateOf(false) }
     var showRestoreArchiveDialog by remember { mutableStateOf(false) }
     var showEmptyRecycleBinDialog by remember { mutableStateOf(false) }
@@ -649,7 +727,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var pendingExcludedUri by remember { mutableStateOf<Uri?>(null) }
     var isLoaded by rememberSaveable { mutableStateOf(false) }
     var selectedMediaTab by rememberSaveable { mutableIntStateOf(0) }
-    var videoUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var videoItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
 
     // Load images from MediaStore and saved folders
     LaunchedEffect(Unit) {
@@ -665,17 +743,20 @@ fun GalleryScreen(initialUri: Uri? = null) {
         val savedUris =
             prefs.getStringSet("added_uris", emptySet())?.map { Uri.parse(it) } ?: emptyList()
 
-        val foundUris = queryImages(context)
-        selectedImageUris = (foundUris + savedUris).distinct()
-        videoUris = queryVideos(context)
+        val foundImages = queryImages(context)
+        val savedItems = savedUris.mapNotNull { getMediaItemFromUri(context, it) }
+        imageItems = (foundImages + savedItems).distinctBy { it.uri }
+        videoItems = queryVideos(context)
 
         initialUri?.let { uri ->
-            val index = selectedImageUris.indexOf(uri)
+            val index = imageItems.indexOfFirst { it.uri == uri }
             if (index != -1) {
                 selectedImageIndex = index
             } else {
-                selectedImageUris = listOf(uri) + selectedImageUris
-                selectedImageIndex = 0
+                getMediaItemFromUri(context, uri)?.let { item ->
+                    imageItems = listOf(item) + imageItems
+                    selectedImageIndex = 0
+                }
             }
         }
         isLoaded = true
@@ -690,6 +771,9 @@ fun GalleryScreen(initialUri: Uri? = null) {
     LaunchedEffect(archiveAfter30Days) {
         prefs.edit().putBoolean("archive_after_30_days", archiveAfter30Days).apply()
     }
+    LaunchedEffect(filterByDate) {
+        prefs.edit().putBoolean("filter_by_date", filterByDate).apply()
+    }
 
     LaunchedEffect(excludedPictureFolders) {
         prefs.edit().putStringSet("excluded_picture_folders", excludedPictureFolders).apply()
@@ -699,31 +783,39 @@ fun GalleryScreen(initialUri: Uri? = null) {
         prefs.edit().putStringSet("excluded_video_folders", excludedVideoFolders).apply()
     }
 
-    LaunchedEffect(selectedImageUris) {
+    LaunchedEffect(imageItems) {
         if (isLoaded) {
             val uriStrings =
-                selectedImageUris.filter { it.scheme == "content" }.map { it.toString() }.toSet()
+                imageItems.filter { it.uri.scheme == "content" }.map { it.uri.toString() }.toSet()
             prefs.edit().putStringSet("added_uris", uriStrings).apply()
         }
     }
 
-    val filteredUris = remember(selectedImageUris, excludedPictureFolders) {
-        selectedImageUris.filter { uri ->
-            val path = getRealPathFromUri(context, uri) ?: uri.toString()
+    val filteredItems = remember(imageItems, excludedPictureFolders) {
+        imageItems.filter { item ->
+            val path = getRealPathFromUri(context, item.uri) ?: item.uri.toString()
             excludedPictureFolders.none { excluded -> path.startsWith(excluded) }
         }
     }
-    val filteredVideoUris = remember(videoUris, excludedVideoFolders) {
-        videoUris.filter { uri ->
-            val path = getRealPathFromUri(context, uri) ?: uri.toString()
+    val filteredVideoItems = remember(videoItems, excludedVideoFolders) {
+        videoItems.filter { item ->
+            val path = getRealPathFromUri(context, item.uri) ?: item.uri.toString()
             excludedVideoFolders.none { excluded -> path.startsWith(excluded) }
         }
     }
 
-    LaunchedEffect(showUsedStorageDialog, filteredUris, filteredVideoUris) {
+    val groupedItems = remember(filteredItems, filterByDate) {
+        groupMediaByDate(filteredItems, filterByDate)
+    }
+
+    val groupedVideoItems = remember(filteredVideoItems, filterByDate) {
+        groupMediaByDate(filteredVideoItems, filterByDate)
+    }
+
+    LaunchedEffect(showUsedStorageDialog, filteredItems, filteredVideoItems) {
         if (showUsedStorageDialog) {
-            usedPictureBytes = calculateUsedStorageBytes(context, filteredUris)
-            usedVideoBytes = calculateUsedStorageBytes(context, filteredVideoUris)
+            usedPictureBytes = calculateUsedStorageBytes(context, filteredItems.map { it.uri })
+            usedVideoBytes = calculateUsedStorageBytes(context, filteredVideoItems.map { it.uri })
         }
     }
 
@@ -757,12 +849,12 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 }
             }
 
-            selectedImageUris = selectedImageUris.filterNot { it in deletedUris }
-            videoUris = videoUris.filterNot { it in deletedUris }
+            imageItems = imageItems.filterNot { it.uri in deletedUris }
+            videoItems = videoItems.filterNot { it.uri in deletedUris }
             checkedUris = checkedUris.filterNot { it in deletedUris }.toSet()
             selectedImageIndex = selectedImageIndex?.takeIf { index ->
-                val currentUri = filteredUris.getOrNull(index)
-                currentUri != null && currentUri !in deletedUris
+                val currentItem = filteredItems.getOrNull(index)
+                currentItem != null && currentItem.uri !in deletedUris
             }
             if (selectedVideoUri in deletedUris) {
                 selectedVideoUri = null
@@ -892,8 +984,8 @@ fun GalleryScreen(initialUri: Uri? = null) {
         scope.launch {
             val items = database.recycledItemDao().getAll()
             items.filter { !it.isArchived }.forEach { repository.restoreItem(it) }
-            val foundUris = queryImages(context)
-            selectedImageUris = (foundUris + selectedImageUris).distinct()
+            val foundImages = queryImages(context)
+            imageItems = (foundImages + imageItems).distinctBy { it.uri }
             Toast.makeText(context, "Pictures restored from Recycle Bin", Toast.LENGTH_SHORT).show()
         }
     }
@@ -901,8 +993,8 @@ fun GalleryScreen(initialUri: Uri? = null) {
     fun restoreFromArchive() {
         scope.launch {
             restoreFromArchiveInternal(database.recycledItemDao(), repository)
-            val foundUris = queryImages(context)
-            selectedImageUris = (foundUris + selectedImageUris).distinct()
+            val foundImages = queryImages(context)
+            imageItems = (foundImages + imageItems).distinctBy { it.uri }
             Toast.makeText(context, "Pictures restored from Archive", Toast.LENGTH_SHORT).show()
         }
     }
@@ -920,7 +1012,8 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 } catch (_: Exception) {
                 }
             }
-            selectedImageUris = (selectedImageUris + uris).distinct()
+            val newItems = uris.mapNotNull { getMediaItemFromUri(context, it) }
+            imageItems = (imageItems + newItems).distinctBy { it.uri }
         }
     }
 
@@ -990,7 +1083,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 }
 
                 Text(
-                    text = "Found ${filteredUris.size} pictures and ${filteredVideoUris.size} videos.",
+                    text = "Found ${filteredItems.size} pictures and ${filteredVideoItems.size} videos.",
                     modifier = Modifier.padding(16.dp),
                     color = AppTheme.colors.textPrimary,
                     style = MaterialTheme.typography.titleMedium
@@ -1001,13 +1094,13 @@ fun GalleryScreen(initialUri: Uri? = null) {
                         .weight(1f)
                         .fillMaxWidth()
                         .then(
-                            if (selectedMediaTab == 0 && filteredUris.isEmpty()) {
+                            if (selectedMediaTab == 0 && filteredItems.isEmpty()) {
                                 Modifier.clickable { multiplePhotoPickerLauncher.launch(arrayOf("image/*")) }
                             } else Modifier
                         )
                 ) {
                     if (selectedMediaTab == 0) {
-                        if (filteredUris.isEmpty()) {
+                        if (filteredItems.isEmpty()) {
                             Text(
                                 text = "Tap anywhere to choose pictures.",
                                 modifier = Modifier.align(Alignment.Center),
@@ -1024,58 +1117,76 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                     bottom = 80.dp
                                 )
                             ) {
-                                itemsIndexed(filteredUris) { index, uri ->
-                                    val isChecked = uri in checkedUris
-                                    Box(
-                                        modifier = Modifier
-                                            .padding(4.dp)
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(AppTheme.colors.cardBackground)
-                                            .combinedClickable(
-                                                onClick = {
-                                                    if (checkedUris.isNotEmpty()) {
-                                                        checkedUris =
-                                                            if (isChecked) checkedUris - uri else checkedUris + uri
-                                                    } else {
-                                                        selectedImageIndex = index
-                                                    }
-                                                },
-                                                onLongClick = {
-                                                    checkedUris =
-                                                        if (isChecked) checkedUris - uri else checkedUris + uri
-                                                }
+                                items(
+                                    items = groupedItems,
+                                    span = { item ->
+                                        if (item is GalleryItem.Header) GridItemSpan(3) else GridItemSpan(1)
+                                    }
+                                ) { galleryItem ->
+                                    when (galleryItem) {
+                                        is GalleryItem.Header -> {
+                                            Text(
+                                                text = galleryItem.dateString,
+                                                modifier = Modifier.padding(start = 12.dp, top = 16.dp, bottom = 8.dp),
+                                                color = Color.White,
+                                                style = MaterialTheme.typography.bodySmall
                                             )
-                                    ) {
-                                        AsyncImage(
-                                            model = ImageRequest.Builder(LocalContext.current)
-                                                .data(uri)
-                                                .size(300) // Optimization: Target size for grid thumbnails
-                                                .crossfade(true)
-                                                .build(),
-                                            contentDescription = "Selected Picture",
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentScale = ContentScale.Crop
-                                        )
-                                        if (checkedUris.isNotEmpty()) {
-                                            Icon(
-                                                imageVector = if (isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
-                                                contentDescription = null,
-                                                tint = if (isChecked) AppTheme.colors.accent else Color.White.copy(
-                                                    alpha = 0.5f
-                                                ),
+                                        }
+                                        is GalleryItem.Media -> {
+                                            val media = galleryItem.media
+                                            val isChecked = media.uri in checkedUris
+                                            Box(
                                                 modifier = Modifier
-                                                    .align(Alignment.TopEnd)
                                                     .padding(4.dp)
-                                                    .size(24.dp)
-                                            )
+                                                    .aspectRatio(1f)
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(AppTheme.colors.cardBackground)
+                                                    .combinedClickable(
+                                                        onClick = {
+                                                            if (checkedUris.isNotEmpty()) {
+                                                                checkedUris =
+                                                                    if (isChecked) checkedUris - media.uri else checkedUris + media.uri
+                                                            } else {
+                                                                selectedImageIndex = filteredItems.indexOf(media)
+                                                            }
+                                                        },
+                                                        onLongClick = {
+                                                            checkedUris =
+                                                                if (isChecked) checkedUris - media.uri else checkedUris + media.uri
+                                                        }
+                                                    )
+                                            ) {
+                                                AsyncImage(
+                                                    model = ImageRequest.Builder(LocalContext.current)
+                                                        .data(media.uri)
+                                                        .size(300)
+                                                        .crossfade(true)
+                                                        .build(),
+                                                    contentDescription = "Selected Picture",
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    contentScale = ContentScale.Crop
+                                                )
+                                                if (checkedUris.isNotEmpty()) {
+                                                    Icon(
+                                                        imageVector = if (isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                                        contentDescription = null,
+                                                        tint = if (isChecked) AppTheme.colors.accent else Color.White.copy(
+                                                            alpha = 0.5f
+                                                        ),
+                                                        modifier = Modifier
+                                                            .align(Alignment.TopEnd)
+                                                            .padding(4.dp)
+                                                            .size(24.dp)
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                     } else {
-                        if (filteredVideoUris.isEmpty()) {
+                        if (filteredVideoItems.isEmpty()) {
                             Text(
                                 text = "No videos found.",
                                 modifier = Modifier.align(Alignment.Center),
@@ -1092,66 +1203,84 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                     bottom = 80.dp
                                 )
                             ) {
-                                itemsIndexed(filteredVideoUris) { _, uri ->
-                                    val isChecked = uri in checkedUris
-                                    val videoThumbnail = remember(uri) { getVideoThumbnailBitmap(context, uri) }
-                                    Box(
-                                        modifier = Modifier
-                                            .padding(4.dp)
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(12.dp))
-                                            .background(AppTheme.colors.cardBackground)
-                                            .combinedClickable(
-                                                onClick = {
-                                                    if (checkedUris.isNotEmpty()) {
-                                                        checkedUris =
-                                                            if (isChecked) checkedUris - uri else checkedUris + uri
-                                                    } else {
-                                                        selectedVideoUri = uri
-                                                        showVideoPlayer = true
-                                                        showVideoMetadataDialog = false
-                                                    }
-                                                },
-                                                onLongClick = {
-                                                    checkedUris =
-                                                        if (isChecked) checkedUris - uri else checkedUris + uri
-                                                }
+                                items(
+                                    items = groupedVideoItems,
+                                    span = { item ->
+                                        if (item is GalleryItem.Header) GridItemSpan(3) else GridItemSpan(1)
+                                    }
+                                ) { galleryItem ->
+                                    when (galleryItem) {
+                                        is GalleryItem.Header -> {
+                                            Text(
+                                                text = galleryItem.dateString,
+                                                modifier = Modifier.padding(start = 12.dp, top = 16.dp, bottom = 8.dp),
+                                                color = Color.White,
+                                                style = MaterialTheme.typography.bodySmall
                                             )
-                                    ) {
-                                        if (videoThumbnail != null) {
-                                            AsyncImage(
-                                                model = videoThumbnail,
-                                                contentDescription = "Selected Video",
-                                                modifier = Modifier.fillMaxSize(),
-                                                contentScale = ContentScale.Crop
-                                            )
-                                        } else {
+                                        }
+                                        is GalleryItem.Media -> {
+                                            val media = galleryItem.media
+                                            val isChecked = media.uri in checkedUris
+                                            val videoThumbnail = remember(media.uri) { getVideoThumbnailBitmap(context, media.uri) }
                                             Box(
                                                 modifier = Modifier
-                                                    .fillMaxSize()
-                                                    .background(AppTheme.colors.cardBackground),
-                                                contentAlignment = Alignment.Center
-                                            ) {
-                                                Icon(
-                                                    Icons.Default.Fullscreen,
-                                                    contentDescription = null,
-                                                    tint = AppTheme.colors.accent,
-                                                    modifier = Modifier.size(32.dp)
-                                                )
-                                            }
-                                        }
-                                        if (checkedUris.isNotEmpty()) {
-                                            Icon(
-                                                imageVector = if (isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
-                                                contentDescription = null,
-                                                tint = if (isChecked) AppTheme.colors.accent else Color.White.copy(
-                                                    alpha = 0.5f
-                                                ),
-                                                modifier = Modifier
-                                                    .align(Alignment.TopEnd)
                                                     .padding(4.dp)
-                                                    .size(24.dp)
-                                            )
+                                                    .aspectRatio(1f)
+                                                    .clip(RoundedCornerShape(12.dp))
+                                                    .background(AppTheme.colors.cardBackground)
+                                                    .combinedClickable(
+                                                        onClick = {
+                                                            if (checkedUris.isNotEmpty()) {
+                                                                checkedUris =
+                                                                    if (isChecked) checkedUris - media.uri else checkedUris + media.uri
+                                                            } else {
+                                                                selectedVideoUri = media.uri
+                                                                showVideoPlayer = true
+                                                                showVideoMetadataDialog = false
+                                                            }
+                                                        },
+                                                        onLongClick = {
+                                                            checkedUris =
+                                                                if (isChecked) checkedUris - media.uri else checkedUris + media.uri
+                                                        }
+                                                    )
+                                            ) {
+                                                if (videoThumbnail != null) {
+                                                    AsyncImage(
+                                                        model = videoThumbnail,
+                                                        contentDescription = "Selected Video",
+                                                        modifier = Modifier.fillMaxSize(),
+                                                        contentScale = ContentScale.Crop
+                                                    )
+                                                } else {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .fillMaxSize()
+                                                            .background(AppTheme.colors.cardBackground),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Default.Fullscreen,
+                                                            contentDescription = null,
+                                                            tint = AppTheme.colors.accent,
+                                                            modifier = Modifier.size(32.dp)
+                                                        )
+                                                    }
+                                                }
+                                                if (checkedUris.isNotEmpty()) {
+                                                    Icon(
+                                                        imageVector = if (isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                                        contentDescription = null,
+                                                        tint = if (isChecked) AppTheme.colors.accent else Color.White.copy(
+                                                            alpha = 0.5f
+                                                        ),
+                                                        modifier = Modifier
+                                                            .align(Alignment.TopEnd)
+                                                            .padding(4.dp)
+                                                            .size(24.dp)
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -1186,7 +1315,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                             IconButton(onClick = {
                                 val firstSelected = checkedUris.firstOrNull()
                                 selectedImageIndex =
-                                    filteredUris.indexOf(firstSelected).takeIf { it != -1 }
+                                    filteredItems.indexOfFirst { it.uri == firstSelected }.takeIf { it != -1 }
                             }) {
                                 Icon(
                                     Icons.Default.Fullscreen,
@@ -1277,7 +1406,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 )
             ) {
                 val pagerState =
-                    rememberPagerState(initialPage = initialIndex, pageCount = { filteredUris.size })
+                    rememberPagerState(initialPage = initialIndex, pageCount = { filteredItems.size })
                 var isImageZoomed by remember { mutableStateOf(false) }
                 var systemBarsVisible by remember { mutableStateOf(true) }
                 val activity = LocalContext.current.getActivity()
@@ -1309,7 +1438,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                     }
                 }
 
-                val currentUri = filteredUris.getOrNull(pagerState.currentPage)
+                val currentUri = filteredItems.getOrNull(pagerState.currentPage)?.uri
                 val currentEditState = currentUri?.let { imageEdits[it] } ?: EditState()
 
                 Box(
@@ -1323,7 +1452,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                         userScrollEnabled = !isImageZoomed,
                         modifier = Modifier.fillMaxSize()
                     ) { page ->
-                        val uri = filteredUris[page]
+                        val uri = filteredItems[page].uri
                         val editState = imageEdits[uri] ?: EditState()
                         ZoomableImage(
                             model = uri,
@@ -1431,7 +1560,9 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                                 cropImageAndSaveCopy(context, uri)
                                             }
                                             if (croppedUri != null) {
-                                                selectedImageUris = (listOf(croppedUri) + selectedImageUris).distinct()
+                                                getMediaItemFromUri(context, croppedUri)?.let { item ->
+                                                    imageItems = (listOf(item) + imageItems).distinctBy { it.uri }
+                                                }
                                                 Toast.makeText(context, "Cropped copy saved", Toast.LENGTH_SHORT).show()
                                             } else {
                                                 Toast.makeText(context, "Could not crop image", Toast.LENGTH_SHORT).show()
@@ -1482,7 +1613,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                         }
 
                         Text(
-                            text = "${pagerState.currentPage + 1} / ${filteredUris.size}",
+                            text = "${pagerState.currentPage + 1} / ${filteredItems.size}",
                             color = AppTheme.colors.textPrimary,
                             style = MaterialTheme.typography.bodyLarge,
                             modifier = Modifier
@@ -1540,6 +1671,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
             onAbout = { showSettingsMenu = false; showAboutDialog = true },
             onRecycleBin = { showSettingsMenu = false; showRecycleBinSettings = true },
             onArchive = { showSettingsMenu = false; showArchiveSettings = true },
+            onFilterSettings = { showSettingsMenu = false; showFilterSettings = true },
             onOpenRecycleBinFolder = {
                 showSettingsMenu = false
                 openManagedFolderInPicker(context, "RecycleBin")
@@ -1580,7 +1712,8 @@ fun GalleryScreen(initialUri: Uri? = null) {
     }
 
     if (showMetadataDialog) {
-        filteredUris.getOrNull(selectedImageIndex ?: 0)?.let { uri ->
+        filteredItems.getOrNull(selectedImageIndex ?: 0)?.let { item ->
+            val uri = item.uri
             MetadataDialog(
                 uri = uri,
                 editState = imageEdits[uri] ?: EditState(),
@@ -1902,6 +2035,59 @@ fun GalleryScreen(initialUri: Uri? = null) {
             }
         )
     }
+
+    if (showFilterSettings) {
+        FilterSettingsDialog(
+            filterByDate = filterByDate,
+            onFilterByDateChanged = { filterByDate = it },
+            onDismiss = { showFilterSettings = false }
+        )
+    }
+}
+
+@Composable
+fun FilterSettingsDialog(
+    filterByDate: Boolean,
+    onFilterByDateChanged: (Boolean) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = AppTheme.colors.background,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
+                Text(
+                    text = "Filter",
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = AppTheme.colors.textPrimary,
+                    modifier = Modifier.padding(bottom = 16.dp)
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("Filter by date", color = AppTheme.colors.textPrimary)
+                    Switch(
+                        checked = filterByDate,
+                        onCheckedChange = onFilterByDateChanged
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.align(Alignment.End)
+                ) { Text("Close", color = AppTheme.colors.accent) }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1915,6 +2101,7 @@ fun SettingsDialog(
     onAbout: () -> Unit,
     onRecycleBin: () -> Unit,
     onArchive: () -> Unit,
+    onFilterSettings: () -> Unit,
     onOpenRecycleBinFolder: () -> Unit,
     onOpenArchiveFolder: () -> Unit,
     onUsedStorage: () -> Unit
@@ -1975,6 +2162,27 @@ fun SettingsDialog(
                         )
                         Spacer(Modifier.width(12.dp)); Text(
                         "Archive",
+                        color = AppTheme.colors.textPrimary
+                    )
+                    }
+                }
+
+                TextButton(
+                    onClick = onFilterSettings,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.FilterBAndW,
+                            contentDescription = null,
+                            tint = AppTheme.colors.textPrimary
+                        )
+                        Spacer(Modifier.width(12.dp)); Text(
+                        "Filter",
                         color = AppTheme.colors.textPrimary
                     )
                     }
@@ -2640,6 +2848,71 @@ fun MetadataDialog(
     )
 }
 
+private val screenshotRegex = Regex("""Screenshot_(\d{8})_(\d{6})""")
+private val signalRegex = Regex("""signal-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})""")
+
+fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: String?, mediaStoreDateTaken: Long): Long {
+    // 1. Try Metadata extraction
+    if (mimeType?.startsWith("image/") == true) {
+        try {
+            context.contentResolver.openInputStream(uri)?.use { inputStream ->
+                val exif = ExifInterface(inputStream)
+                val dateStr = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+                if (dateStr != null) {
+                    val sdf = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US)
+                    sdf.parse(dateStr)?.time?.let { return it }
+                }
+            }
+        } catch (_: Exception) {}
+    } else if (mimeType?.startsWith("video/") == true) {
+        try {
+            val retriever = MediaMetadataRetriever()
+            retriever.setDataSource(context, uri)
+            val dateStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)
+            retriever.release()
+            if (dateStr != null) {
+                // MediaMetadataRetriever dates can vary in format, but often yyyyMMdd'T'HHmmss.SSS'Z'
+                val formats = listOf(
+                    "yyyyMMdd'T'HHmmss.SSS'Z'",
+                    "yyyyMMdd'T'HHmmss'Z'",
+                    "yyyy:MM:dd HH:mm:ss"
+                )
+                for (format in formats) {
+                    try {
+                        val sdf = SimpleDateFormat(format, Locale.US)
+                        sdf.parse(dateStr)?.time?.let { return it }
+                    } catch (_: Exception) {}
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
+    // 2. Try Filename parsing
+    displayName?.let { name ->
+        screenshotRegex.find(name)?.let { match ->
+            try {
+                val datePart = match.groupValues[1] // yyyyMMdd
+                val timePart = match.groupValues[2] // HHmmss
+                val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+                sdf.parse("${datePart}_${timePart}")?.time?.let { return it }
+            } catch (_: Exception) {}
+        }
+        signalRegex.find(name)?.let { match ->
+            try {
+                val dateStr = match.groupValues[1] // yyyy-MM-dd-HH-mm-ss
+                val sdf = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US)
+                sdf.parse(dateStr)?.time?.let { return it }
+            } catch (_: Exception) {}
+        }
+    }
+
+    // 3. Fallback to MediaStore DATE_TAKEN
+    if (mediaStoreDateTaken > 0) return mediaStoreDateTaken
+
+    // 4. Ultimate fallback to current time
+    return System.currentTimeMillis()
+}
+
 fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
     val mediaStoreUri = resolveToMediaStoreUri(context, uri)
     val projection = arrayOf(
@@ -2647,7 +2920,8 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
         MediaStore.MediaColumns.DISPLAY_NAME,
         MediaStore.MediaColumns.SIZE,
         MediaStore.MediaColumns.MIME_TYPE,
-        MediaStore.MediaColumns.DATE_ADDED
+        MediaStore.MediaColumns.DATE_ADDED,
+        MediaStore.MediaColumns.DATE_TAKEN
     )
 
     var mediaItem: MediaItem? = null
@@ -2659,7 +2933,9 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
                 val size = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE))
                 val mimeType = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE))
                 val dateAdded = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED))
-                mediaItem = MediaItem(uri, path, name, size, mimeType, dateAdded)
+                val dateTakenRaw = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_TAKEN))
+                val dateTaken = extractBestDate(context, uri, name, mimeType, dateTakenRaw)
+                mediaItem = MediaItem(uri, path, name, size, mimeType, dateAdded, dateTaken)
             }
         }
     } catch (_: Exception) {}
@@ -2672,7 +2948,9 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
                     val name = cursor.getString(cursor.getColumnIndexOrThrow(OpenableColumns.DISPLAY_NAME)) ?: "Unknown"
                     val size = cursor.getLong(cursor.getColumnIndexOrThrow(OpenableColumns.SIZE))
                     val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
-                    mediaItem = MediaItem(uri, uri.path ?: "", name, size, mimeType, System.currentTimeMillis() / 1000)
+                    val now = System.currentTimeMillis()
+                    val dateTaken = extractBestDate(context, uri, name, mimeType, 0L)
+                    mediaItem = MediaItem(uri, uri.path ?: "", name, size, mimeType, now / 1000, dateTaken)
                 }
             }
         } catch (_: Exception) {}

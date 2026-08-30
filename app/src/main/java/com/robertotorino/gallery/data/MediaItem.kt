@@ -8,5 +8,6 @@ data class MediaItem(
     val displayName: String,
     val size: Long,
     val mimeType: String,
-    val dateAdded: Long
+    val dateAdded: Long,
+    val dateTaken: Long
 )
