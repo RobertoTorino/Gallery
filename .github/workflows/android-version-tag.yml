@@ -1,4 +1,4 @@
-name: Android build, version bump and tag
+name: Android Release Build
 
 on:
   push:

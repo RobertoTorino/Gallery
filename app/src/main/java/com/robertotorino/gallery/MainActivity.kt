@@ -622,6 +622,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var excludedVideoFolders by remember { mutableStateOf(setOf<String>()) }
     var showWallpaperConfirm by remember { mutableStateOf(false) }
     var pendingWallpaperUri by remember { mutableStateOf<Uri?>(null) }
+    var preparedRecycledItems by remember { mutableStateOf<List<Pair<Uri, com.robertotorino.gallery.data.RecycledItem>>>(emptyList()) }
 
     var useRecycleBin by remember { mutableStateOf(prefs.getBoolean("use_recycle_bin", false)) }
     var recycleBinDays by remember { mutableIntStateOf(prefs.getInt("recycle_bin_days", 30)) }
@@ -739,6 +740,22 @@ fun GalleryScreen(initialUri: Uri? = null) {
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             val deletedUris = urisToDelete
+            
+            // Finalize Recycle Bin / Archive moves if any
+            if (preparedRecycledItems.isNotEmpty()) {
+                scope.launch {
+                    preparedRecycledItems.forEach { (originalUri, recycledItem) ->
+                        // Only finalize if the original was actually deleted from MediaStore
+                        if (originalUri in deletedUris) {
+                            repository.finalizeMove(recycledItem)
+                        } else {
+                            repository.abandonMove(recycledItem)
+                        }
+                    }
+                    preparedRecycledItems = emptyList()
+                }
+            }
+
             selectedImageUris = selectedImageUris.filterNot { it in deletedUris }
             videoUris = videoUris.filterNot { it in deletedUris }
             checkedUris = checkedUris.filterNot { it in deletedUris }.toSet()
@@ -752,7 +769,20 @@ fun GalleryScreen(initialUri: Uri? = null) {
             }
             urisToDelete = emptyList()
             val deletedMediaLabel = if (deleteMediaType == DeleteMediaType.VIDEOS) "Video(s)" else "Picture(s)"
-            Toast.makeText(context, "$deletedMediaLabel deleted", Toast.LENGTH_SHORT).show()
+            val actionLabel = if (preparedRecycledItems.isNotEmpty()) {
+                if (preparedRecycledItems.first().second.isArchived) "moved to Archive" else "moved to Recycle Bin"
+            } else "deleted"
+            Toast.makeText(context, "$deletedMediaLabel $actionLabel", Toast.LENGTH_SHORT).show()
+        } else {
+            // Abandon all prepared items if user cancelled deletion
+            if (preparedRecycledItems.isNotEmpty()) {
+                scope.launch {
+                    preparedRecycledItems.forEach { (_, recycledItem) ->
+                        repository.abandonMove(recycledItem)
+                    }
+                    preparedRecycledItems = emptyList()
+                }
+            }
         }
     }
 
@@ -760,54 +790,48 @@ fun GalleryScreen(initialUri: Uri? = null) {
         return resolveToMediaStoreUri(context, uri)
     }
 
-    fun deleteImages(uris: List<Uri>) {
+    fun deleteMedia(uris: List<Uri>) {
         val activity = context.getActivity() ?: return
         val executor = ContextCompat.getMainExecutor(activity)
+        val targetMediaLabel = if (deleteMediaType == DeleteMediaType.VIDEOS) "video(s)" else "picture(s)"
+        
         val biometricPrompt = BiometricPrompt(
             activity, executor,
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     super.onAuthenticationSucceeded(result)
-                    val targetMediaLabel = if (deleteMediaType == DeleteMediaType.VIDEOS) "Video(s)" else "Picture(s)"
-                    if (useRecycleBin) {
-                        scope.launch {
-                            moveToRecycleBinInternal(uris, context, repository)
-                            selectedImageUris = selectedImageUris.filterNot { it in uris }
-                            videoUris = videoUris.filterNot { it in uris }
-                            checkedUris = checkedUris.filterNot { it in uris }.toSet()
-                            selectedImageIndex = selectedImageIndex?.takeIf { index ->
-                                val currentUri = filteredUris.getOrNull(index)
-                                currentUri != null && currentUri !in uris
-                            }
-                            if (selectedVideoUri in uris) {
-                                selectedVideoUri = null
-                                showVideoPlayer = false
-                            }
-                            urisToDelete = emptyList()
-                            Toast.makeText(context, "$targetMediaLabel moved to Recycle Bin", Toast.LENGTH_SHORT).show()
+                    
+                    scope.launch {
+                        val resolvedUris = uris.map { resolveToMediaStoreUri(it) }
+                        if (resolvedUris.isEmpty()) {
+                            Toast.makeText(context, "Could not find media on device storage", Toast.LENGTH_LONG).show()
+                            return@launch
                         }
-                    } else {
-                        try {
-                            val resolvedUris = uris.map { resolveToMediaStoreUri(it) }
-                            if (resolvedUris.isEmpty()) {
-                                Toast.makeText(
-                                    context,
-                                    "Could not find media on device storage",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                                return
+
+                        if (useRecycleBin) {
+                            val prepared = prepareRecycleBinMoveInternal(uris, context, repository)
+                            if (prepared.isEmpty()) {
+                                Toast.makeText(context, "Failed to move items to Recycle Bin", Toast.LENGTH_SHORT).show()
+                                return@launch
                             }
-                            val pendingIntent =
-                                MediaStore.createDeleteRequest(context.contentResolver, resolvedUris)
-                            intentSenderLauncher.launch(
-                                IntentSenderRequest.Builder(pendingIntent.intentSender).build()
-                            )
-                        } catch (e: Exception) {
-                            Toast.makeText(
-                                context,
-                                "Error initiating delete: ${e.message}",
-                                Toast.LENGTH_LONG
-                            ).show()
+                            preparedRecycledItems = prepared
+                            urisToDelete = prepared.map { it.first }
+                            
+                            try {
+                                val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, prepared.map { resolveToMediaStoreUri(it.first) })
+                                intentSenderLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                            } catch (e: Exception) {
+                                prepared.forEach { repository.abandonMove(it.second) }
+                                preparedRecycledItems = emptyList()
+                                Toast.makeText(context, "Error initiating delete: ${e.message}", Toast.LENGTH_LONG).show()
+                            }
+                        } else {
+                            try {
+                                val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, resolvedUris)
+                                intentSenderLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Error initiating delete: ${e.message}", Toast.LENGTH_LONG).show()
+                            }
                         }
                     }
                 }
@@ -821,7 +845,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
 
         val promptInfo = BiometricPrompt.PromptInfo.Builder()
             .setTitle("Confirm Deletion")
-            .setSubtitle("Authenticate to delete picture(s)")
+            .setSubtitle("Authenticate to delete $targetMediaLabel")
             .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG or BiometricManager.Authenticators.DEVICE_CREDENTIAL)
             .build()
 
@@ -836,12 +860,30 @@ fun GalleryScreen(initialUri: Uri? = null) {
         }
     }
 
-    fun archiveImages(uris: List<Uri>) {
+    fun archiveMedia(uris: List<Uri>) {
+        val targetMediaLabel = if (deleteMediaType == DeleteMediaType.VIDEOS) "video(s)" else "picture(s)"
         scope.launch {
-            archiveImagesInternal(uris, context, repository)
-            selectedImageUris = selectedImageUris.filterNot { it in uris }
-            checkedUris = checkedUris.filterNot { it in uris }.toSet()
-            Toast.makeText(context, "Picture(s) moved to Archive", Toast.LENGTH_SHORT).show()
+            val prepared = prepareArchiveMoveInternal(uris, context, repository)
+            if (prepared.isEmpty()) {
+                Toast.makeText(context, "Failed to move $targetMediaLabel to Archive", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+            preparedRecycledItems = prepared
+            urisToDelete = prepared.map { it.first }
+
+            try {
+                val pendingIntent = MediaStore.createDeleteRequest(
+                    context.contentResolver,
+                    prepared.map { resolveToMediaStoreUri(it.first) }
+                )
+                intentSenderLauncher.launch(
+                    IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                )
+            } catch (e: Exception) {
+                prepared.forEach { repository.abandonMove(it.second) }
+                preparedRecycledItems = emptyList()
+                Toast.makeText(context, "Error initiating archive: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 
@@ -1525,9 +1567,9 @@ fun GalleryScreen(initialUri: Uri? = null) {
     if (showExcludedFoldersDialog) {
         ExcludedFoldersDialog(
             title = if (exclusionMediaType == ExclusionMediaType.PICTURES) {
-                "Excluded Picture Folders"
+                "Excluded Folders"
             } else {
-                "Excluded Video Folders"
+                "Excluded Folders"
             },
             excludedFolders = if (exclusionMediaType == ExclusionMediaType.PICTURES) {
                 excludedPictureFolders
@@ -1535,14 +1577,14 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 excludedVideoFolders
             },
             emptyText = if (exclusionMediaType == ExclusionMediaType.PICTURES) {
-                "No picture folders excluded."
+                "No folders excluded."
             } else {
-                "No video folders excluded."
+                "No folders excluded."
             },
             addButtonLabel = if (exclusionMediaType == ExclusionMediaType.PICTURES) {
-                "Add picture folders for exclusions"
+                "Add folders for exclusions"
             } else {
-                "Add video folders for exclusions"
+                "Add folders for exclusions"
             },
             onRemoveFolder = { folder ->
                 if (exclusionMediaType == ExclusionMediaType.PICTURES) {
@@ -1627,10 +1669,10 @@ fun GalleryScreen(initialUri: Uri? = null) {
                     if (path != null) {
                         if (exclusionMediaType == ExclusionMediaType.PICTURES) {
                             excludedPictureFolders = excludedPictureFolders + path
-                            Toast.makeText(context, "Picture folder excluded", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Folder excluded", Toast.LENGTH_SHORT).show()
                         } else {
                             excludedVideoFolders = excludedVideoFolders + path
-                            Toast.makeText(context, "Video folder excluded", Toast.LENGTH_SHORT).show()
+                            Toast.makeText(context, "Folder excluded", Toast.LENGTH_SHORT).show()
                         }
                     } else {
                         Toast.makeText(context, "Could not resolve folder path", Toast.LENGTH_SHORT)
@@ -1679,7 +1721,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = { showDeleteDialog = false; deleteImages(urisToDelete) }) {
+                TextButton(onClick = { showDeleteDialog = false; deleteMedia(urisToDelete) }) {
                     Text("Yes", color = Color.White)
                 }
             },
@@ -1713,9 +1755,11 @@ fun GalleryScreen(initialUri: Uri? = null) {
     }
 
     if (showArchiveDialog) {
+        val mediaLabel = if (deleteMediaType == DeleteMediaType.VIDEOS) "video(s)" else "picture(s)"
         ArchiveSelectionDialog(
+            mediaLabel = mediaLabel,
             onConfirm = {
-                archiveImages(urisToArchive)
+                archiveMedia(urisToArchive)
                 showArchiveDialog = false
             },
             onDismiss = { showArchiveDialog = false }
@@ -2140,7 +2184,6 @@ fun UsedStorageDialog(
     )
 }
 
-@UnstableApi
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun VideoPlayerDialog(
@@ -2840,16 +2883,17 @@ fun ArchiveSettingsDialog(
 
 @Composable
 fun ArchiveSelectionDialog(
+    mediaLabel: String,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Archive", color = AppTheme.colors.textPrimary, fontWeight = FontWeight.Bold) },
-        text = { Text("Move Selection to Archive?", color = AppTheme.colors.textSecondary) },
+        text = { Text("Move $mediaLabel to Archive?", color = AppTheme.colors.textSecondary) },
         confirmButton = {
             TextButton(onClick = onConfirm) {
-                Text("Move Selection to Archive", color = AppTheme.colors.accent)
+                Text("Archive", color = AppTheme.colors.accent)
             }
         },
         dismissButton = {

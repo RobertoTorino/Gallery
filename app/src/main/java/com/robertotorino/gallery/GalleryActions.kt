@@ -9,36 +9,42 @@ internal fun areAllPermissionsGranted(permissions: Map<String, Boolean>): Boolea
     return permissions.values.all { it }
 }
 
-internal suspend fun moveToRecycleBinInternal(
+internal suspend fun prepareRecycleBinMoveInternal(
     uris: List<Uri>,
     context: Context,
     repository: MediaRepository,
     mediaItemProvider: (Context, Uri) -> com.robertotorino.gallery.data.MediaItem? = ::getMediaItemFromUri
-): Int {
-    var successCount = 0
+): List<Pair<Uri, com.robertotorino.gallery.data.RecycledItem>> {
+    val prepared = mutableListOf<Pair<Uri, com.robertotorino.gallery.data.RecycledItem>>()
     uris.forEach { uri ->
         val item = mediaItemProvider(context, uri)
-        if (item != null && repository.moveToRecycleBin(item)) {
-            successCount++
+        if (item != null) {
+            val recycledItem = repository.copyToRecycleBin(item)
+            if (recycledItem != null) {
+                prepared.add(uri to recycledItem)
+            }
         }
     }
-    return successCount
+    return prepared
 }
 
-internal suspend fun archiveImagesInternal(
+internal suspend fun prepareArchiveMoveInternal(
     uris: List<Uri>,
     context: Context,
     repository: MediaRepository,
     mediaItemProvider: (Context, Uri) -> com.robertotorino.gallery.data.MediaItem? = ::getMediaItemFromUri
-): Int {
-    val mediaItems = uris.mapNotNull { mediaItemProvider(context, it) }
-    var successCount = 0
-    mediaItems.forEach { item ->
-        if (repository.moveToArchive(item)) {
-            successCount++
+): List<Pair<Uri, com.robertotorino.gallery.data.RecycledItem>> {
+    val prepared = mutableListOf<Pair<Uri, com.robertotorino.gallery.data.RecycledItem>>()
+    uris.forEach { uri ->
+        val item = mediaItemProvider(context, uri)
+        if (item != null) {
+            val recycledItem = repository.copyToArchive(item)
+            if (recycledItem != null) {
+                prepared.add(uri to recycledItem)
+            }
         }
     }
-    return successCount
+    return prepared
 }
 
 internal suspend fun restoreFromArchiveInternal(

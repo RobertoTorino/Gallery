@@ -44,19 +44,20 @@ class MediaRepository(
         context.getExternalFilesDir("Archive")
     }
 
-    suspend fun moveToRecycleBin(item: MediaItem): Boolean = withContext(Dispatchers.IO) {
-        moveFile(item, recycleBinDir, isArchived = false)
+    suspend fun copyToRecycleBin(item: MediaItem): RecycledItem? = withContext(Dispatchers.IO) {
+        val targetDir = recycleBinDir ?: return@withContext null
+        copyToFolder(item, targetDir, isArchived = false)
     }
 
-    suspend fun moveToArchive(item: MediaItem): Boolean = withContext(Dispatchers.IO) {
-        moveFile(item, archiveDir, isArchived = true)
+    suspend fun copyToArchive(item: MediaItem): RecycledItem? = withContext(Dispatchers.IO) {
+        val targetDir = archiveDir ?: return@withContext null
+        copyToFolder(item, targetDir, isArchived = true)
     }
 
-    private suspend fun moveFile(item: MediaItem, targetDir: File?, isArchived: Boolean): Boolean {
-        if (targetDir == null) return false
+    private fun copyToFolder(item: MediaItem, targetDir: File?, isArchived: Boolean): RecycledItem? {
+        if (targetDir == null) return null
         if (!targetDir.exists()) targetDir.mkdirs()
 
-        // Handle name collisions in target directory
         var targetFile = File(targetDir, item.displayName)
         if (targetFile.exists()) {
             val nameWithoutExtension = targetFile.nameWithoutExtension
@@ -67,30 +68,72 @@ class MediaRepository(
 
         return try {
             val sourceFile = File(item.path)
-            val moved = if (sourceFile.exists() && sourceFile.renameTo(targetFile)) {
+            val copied = if (sourceFile.exists() && sourceFile.renameTo(targetFile)) {
                 true
             } else {
                 copyUriToFile(item.uri, targetFile)
             }
 
-            if (moved) {
-                // Remove from MediaStore
-                context.contentResolver.delete(item.uri, null, null)
-
-                // Add to Room
-                val recycledItem = RecycledItem(
+            if (copied) {
+                RecycledItem(
                     originalPath = item.path,
                     currentPath = targetFile.absolutePath,
                     deletedTimestamp = System.currentTimeMillis(),
                     isArchived = isArchived
                 )
-                recycledItemDao.insert(recycledItem)
-                true
             } else {
-                false
+                null
             }
         } catch (e: Exception) {
             e.printStackTrace()
+            null
+        }
+    }
+
+    suspend fun finalizeMove(recycledItem: RecycledItem) {
+        recycledItemDao.insert(recycledItem)
+    }
+
+    suspend fun abandonMove(recycledItem: RecycledItem) {
+        val file = File(recycledItem.currentPath)
+        if (file.exists()) {
+            file.delete()
+        }
+    }
+
+    suspend fun moveToRecycleBin(item: MediaItem): Boolean = withContext(Dispatchers.IO) {
+        val recycledItem = copyToRecycleBin(item) ?: return@withContext false
+        
+        // Try silent delete (works on older Android or if app is owner)
+        val deletedCount = try {
+            context.contentResolver.delete(item.uri, null, null)
+        } catch (e: Exception) {
+            0
+        }
+
+        if (deletedCount > 0) {
+            finalizeMove(recycledItem)
+            true
+        } else {
+            abandonMove(recycledItem)
+            false
+        }
+    }
+
+    suspend fun moveToArchive(item: MediaItem): Boolean = withContext(Dispatchers.IO) {
+        val recycledItem = copyToArchive(item) ?: return@withContext false
+
+        val deletedCount = try {
+            context.contentResolver.delete(item.uri, null, null)
+        } catch (e: Exception) {
+            0
+        }
+
+        if (deletedCount > 0) {
+            finalizeMove(recycledItem)
+            true
+        } else {
+            abandonMove(recycledItem)
             false
         }
     }
