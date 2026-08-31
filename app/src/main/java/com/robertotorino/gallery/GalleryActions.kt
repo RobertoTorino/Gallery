@@ -47,6 +47,38 @@ internal suspend fun prepareArchiveMoveInternal(
     return prepared
 }
 
+internal suspend fun moveToRecycleBinInternal(
+    uris: List<Uri>,
+    context: Context,
+    repository: MediaRepository,
+    mediaItemProvider: (Context, Uri) -> com.robertotorino.gallery.data.MediaItem?
+): Int {
+    var successCount = 0
+    uris.forEach { uri ->
+        val item = mediaItemProvider(context, uri)
+        if (item != null && repository.moveToRecycleBin(item)) {
+            successCount++
+        }
+    }
+    return successCount
+}
+
+internal suspend fun archiveImagesInternal(
+    uris: List<Uri>,
+    context: Context,
+    repository: MediaRepository,
+    mediaItemProvider: (Context, Uri) -> com.robertotorino.gallery.data.MediaItem?
+): Int {
+    var successCount = 0
+    uris.forEach { uri ->
+        val item = mediaItemProvider(context, uri)
+        if (item != null && repository.moveToArchive(item)) {
+            successCount++
+        }
+    }
+    return successCount
+}
+
 internal suspend fun restoreFromArchiveInternal(
     recycledItemDao: RecycledItemDao,
     repository: MediaRepository

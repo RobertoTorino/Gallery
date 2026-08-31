@@ -169,8 +169,8 @@ class GalleryFunctionsTest {
 
             val context = mockk<Context>()
             val repository = mockk<MediaRepository>()
-            val firstItem = MediaItem(firstUri, "/a.jpg", "a.jpg", 1L, "image/jpeg", 1L)
-            val secondItem = MediaItem(secondUri, "/b.jpg", "b.jpg", 1L, "image/jpeg", 1L)
+            val firstItem = MediaItem(firstUri, "/a.jpg", "a.jpg", 1L, "image/jpeg", 1L, 1L)
+            val secondItem = MediaItem(secondUri, "/b.jpg", "b.jpg", 1L, "image/jpeg", 1L, 1L)
 
             coEvery { repository.moveToRecycleBin(firstItem) } returns true
             coEvery { repository.moveToRecycleBin(secondItem) } returns false
@@ -179,7 +179,7 @@ class GalleryFunctionsTest {
                 uris = listOf(firstUri, secondUri, thirdUri),
                 context = context,
                 repository = repository,
-                mediaItemProvider = { _, uri ->
+                mediaItemProvider = { _, uri: Uri ->
                     when (uri) {
                         firstUri -> firstItem
                         secondUri -> secondItem
@@ -204,8 +204,8 @@ class GalleryFunctionsTest {
 
             val context = mockk<Context>()
             val repository = mockk<MediaRepository>()
-            val firstItem = MediaItem(firstUri, "/a.jpg", "a.jpg", 1L, "image/jpeg", 1L)
-            val secondItem = MediaItem(secondUri, "/b.jpg", "b.jpg", 1L, "image/jpeg", 1L)
+            val firstItem = MediaItem(firstUri, "/a.jpg", "a.jpg", 1L, "image/jpeg", 1L, 1L)
+            val secondItem = MediaItem(secondUri, "/b.jpg", "b.jpg", 1L, "image/jpeg", 1L, 1L)
 
             coEvery { repository.moveToArchive(firstItem) } returns true
             coEvery { repository.moveToArchive(secondItem) } returns false
@@ -214,7 +214,7 @@ class GalleryFunctionsTest {
                 uris = listOf(firstUri, secondUri),
                 context = context,
                 repository = repository,
-                mediaItemProvider = { _, uri -> if (uri == firstUri) firstItem else secondItem }
+                mediaItemProvider = { _, uri: Uri -> if (uri == firstUri) firstItem else secondItem }
             )
 
             assertEquals(1, count)

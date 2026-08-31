@@ -276,8 +276,7 @@ fun queryImages(context: Context): List<MediaItem> {
             val mime = cursor.getString(mimeColumn)
             val added = cursor.getLong(addedColumn)
             val takenRaw = cursor.getLong(takenColumn)
-            val taken = extractBestDate(context, uri, name, mime, takenRaw)
-            items.add(MediaItem(uri, path, name, size, mime, added, taken))
+            items.add(MediaItem(uri, path, name, size, mime, added, takenRaw))
         }
     }
     return items
@@ -328,8 +327,7 @@ fun queryVideos(context: Context): List<MediaItem> {
             val mime = cursor.getString(mimeColumn)
             val added = cursor.getLong(addedColumn)
             val takenRaw = cursor.getLong(takenColumn)
-            val taken = extractBestDate(context, uri, name, mime, takenRaw)
-            items.add(MediaItem(uri, path, name, size, mime, added, taken))
+            items.add(MediaItem(uri, path, name, size, mime, added, takenRaw))
         }
     }
     return items
@@ -757,7 +755,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
             val foundVideos = queryVideos(context)
             Triple(foundImages, foundVideos, savedItems)
         }
-        
+
         imageItems = (foundImages + savedItems).distinctBy { it.uri }
         videoItems = foundVideos
 
@@ -817,12 +815,42 @@ fun GalleryScreen(initialUri: Uri? = null) {
         }
     }
 
-    val groupedItems = remember(filteredItems, filterByDate) {
-        groupMediaByDate(filteredItems, filterByDate)
+    val enrichedItems = remember(filteredItems, filterByDate) {
+        if (!filterByDate) {
+            filteredItems
+        } else {
+            filteredItems.map { item ->
+                if (item.dateTaken > 0L) {
+                    item
+                } else {
+                    val taken = extractBestDate(context, item.uri, item.displayName, item.mimeType, item.dateTaken)
+                    item.copy(dateTaken = taken)
+                }
+            }
+        }
     }
 
-    val groupedVideoItems = remember(filteredVideoItems, filterByDate) {
-        groupMediaByDate(filteredVideoItems, filterByDate)
+    val groupedItems = remember(enrichedItems, filterByDate) {
+        groupMediaByDate(enrichedItems, filterByDate)
+    }
+
+    val enrichedVideoItems = remember(filteredVideoItems, filterByDate) {
+        if (!filterByDate) {
+            filteredVideoItems
+        } else {
+            filteredVideoItems.map { item ->
+                if (item.dateTaken > 0L) {
+                    item
+                } else {
+                    val taken = extractBestDate(context, item.uri, item.displayName, item.mimeType, item.dateTaken)
+                    item.copy(dateTaken = taken)
+                }
+            }
+        }
+    }
+
+    val groupedVideoItems = remember(enrichedVideoItems, filterByDate) {
+        groupMediaByDate(enrichedVideoItems, filterByDate)
     }
 
     LaunchedEffect(showUsedStorageDialog, filteredItems, filteredVideoItems) {
@@ -848,7 +876,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
             val deletedUris = urisToDelete
-            
+
             // Finalize Recycle Bin / Archive moves if any
             if (preparedRecycledItems.isNotEmpty()) {
                 scope.launch {
@@ -902,13 +930,13 @@ fun GalleryScreen(initialUri: Uri? = null) {
         val activity = context.getActivity() ?: return
         val executor = ContextCompat.getMainExecutor(activity)
         val targetMediaLabel = if (deleteMediaType == DeleteMediaType.VIDEOS) "video(s)" else "picture(s)"
-        
+
         val biometricPrompt = BiometricPrompt(
             activity, executor,
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     super.onAuthenticationSucceeded(result)
-                    
+
                     scope.launch {
                         val resolvedUris = uris.map { resolveToMediaStoreUri(it) }
                         if (resolvedUris.isEmpty()) {
@@ -924,7 +952,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
                             }
                             preparedRecycledItems = prepared
                             urisToDelete = prepared.map { it.first }
-                            
+
                             try {
                                 val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, prepared.map { resolveToMediaStoreUri(it.first) })
                                 intentSenderLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
@@ -2876,6 +2904,7 @@ fun MetadataDialog(
 
 private val screenshotRegex = Regex("""Screenshot_(\d{8})_(\d{6})""")
 private val signalRegex = Regex("""signal-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})""")
+private val compactDateTimeRegex = Regex("""(?:^|[^\d])((?:19|20)\d{2})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})(?:[^\d]|$)""")
 
 fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: String?, mediaStoreDateTaken: Long): Long {
     // 1. Try Filename parsing (Fast)
@@ -2895,6 +2924,28 @@ fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: 
                 sdf.parse(dateStr)?.time?.let { return it }
             } catch (_: Exception) {}
         }
+        compactDateTimeRegex.find(name)?.let { match ->
+            try {
+                val dateStr = "${match.groupValues[1]}-${match.groupValues[2]}-${match.groupValues[3]} ${match.groupValues[4]}:${match.groupValues[5]}:${match.groupValues[6]}"
+                val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                sdf.parse(dateStr)?.time?.let { return it }
+            } catch (_: Exception) {}
+        }
+    }
+
+    // 2. Try EXIF DateTimeOriginal/DateTime when available
+    if (mimeType?.startsWith("image/") == true) {
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val exif = ExifInterface(input)
+                val exifDate = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+                    ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
+                exifDate?.let {
+                    val sdf = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US)
+                    sdf.parse(it)?.time?.let { parsed -> return parsed }
+                }
+            }
+        } catch (_: Exception) {}
     }
 
     // 3. Fallback to MediaStore DATE_TAKEN
