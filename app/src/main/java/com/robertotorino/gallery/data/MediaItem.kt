@@ -9,5 +9,6 @@ data class MediaItem(
     val size: Long,
     val mimeType: String,
     val dateAdded: Long,
-    val dateTaken: Long
+    val dateTaken: Long,
+    val isDateFallback: Boolean = false
 )
