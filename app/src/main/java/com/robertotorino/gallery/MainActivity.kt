@@ -643,15 +643,23 @@ fun groupMediaByDate(items: List<MediaItem>, filterByDate: Boolean): List<Galler
         return items.map { GalleryItem.Media(it) }
     }
 
-    val sortedItems = items.sortedWith(compareByDescending<MediaItem> { if (it.dateTaken > 0) it.dateTaken else it.dateAdded * 1000 })
+    // Sort: First by capture date (if valid), fallback to dateAdded. Unsorted (0L) go to the end.
+    val sortedItems = items.sortedWith(
+        compareByDescending<MediaItem> { it.dateTaken > 0 }
+            .thenByDescending { if (it.dateTaken > 0) it.dateTaken else it.dateAdded * 1000 }
+    )
 
     val grouped = mutableListOf<GalleryItem>()
     val dateFormat = SimpleDateFormat("EEEE MMMM d yyyy", Locale.US)
     var currentHeader: String? = null
 
     sortedItems.forEach { item ->
-        val timestamp = if (item.dateTaken > 0) item.dateTaken else item.dateAdded * 1000
-        val dateString = dateFormat.format(Date(timestamp))
+        val dateString = if (item.dateTaken > 0) {
+            dateFormat.format(Date(item.dateTaken))
+        } else {
+            "Unsorted"
+        }
+
         if (dateString != currentHeader) {
             grouped.add(GalleryItem.Header(dateString))
             currentHeader = dateString
@@ -731,22 +739,27 @@ fun GalleryScreen(initialUri: Uri? = null) {
 
     // Load images from MediaStore and saved folders
     LaunchedEffect(Unit) {
-        val savedPictureFolders =
-            prefs.getStringSet(
-                "excluded_picture_folders",
-                prefs.getStringSet("excluded_folders", emptySet()) ?: emptySet()
-            ) ?: emptySet()
-        val savedVideoFolders = prefs.getStringSet("excluded_video_folders", emptySet()) ?: emptySet()
-        excludedPictureFolders = savedPictureFolders
-        excludedVideoFolders = savedVideoFolders
+        val (foundImages, foundVideos, savedItems) = withContext(Dispatchers.IO) {
+            val savedPictureFolders =
+                prefs.getStringSet(
+                    "excluded_picture_folders",
+                    prefs.getStringSet("excluded_folders", emptySet()) ?: emptySet()
+                ) ?: emptySet()
+            val savedVideoFolders = prefs.getStringSet("excluded_video_folders", emptySet()) ?: emptySet()
+            excludedPictureFolders = savedPictureFolders
+            excludedVideoFolders = savedVideoFolders
 
-        val savedUris =
-            prefs.getStringSet("added_uris", emptySet())?.map { Uri.parse(it) } ?: emptyList()
+            val savedUris =
+                prefs.getStringSet("added_uris", emptySet())?.map { Uri.parse(it) } ?: emptyList()
 
-        val foundImages = queryImages(context)
-        val savedItems = savedUris.mapNotNull { getMediaItemFromUri(context, it) }
+            val foundImages = queryImages(context)
+            val savedItems = savedUris.mapNotNull { getMediaItemFromUri(context, it) }
+            val foundVideos = queryVideos(context)
+            Triple(foundImages, foundVideos, savedItems)
+        }
+        
         imageItems = (foundImages + savedItems).distinctBy { it.uri }
-        videoItems = queryVideos(context)
+        videoItems = foundVideos
 
         initialUri?.let { uri ->
             val index = imageItems.indexOfFirst { it.uri == uri }
@@ -814,8 +827,10 @@ fun GalleryScreen(initialUri: Uri? = null) {
 
     LaunchedEffect(showUsedStorageDialog, filteredItems, filteredVideoItems) {
         if (showUsedStorageDialog) {
-            usedPictureBytes = calculateUsedStorageBytes(context, filteredItems.map { it.uri })
-            usedVideoBytes = calculateUsedStorageBytes(context, filteredVideoItems.map { it.uri })
+            withContext(Dispatchers.IO) {
+                usedPictureBytes = calculateUsedStorageBytes(context, filteredItems.map { it.uri })
+                usedVideoBytes = calculateUsedStorageBytes(context, filteredVideoItems.map { it.uri })
+            }
         }
     }
 
@@ -1211,12 +1226,23 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                 ) { galleryItem ->
                                     when (galleryItem) {
                                         is GalleryItem.Header -> {
-                                            Text(
-                                                text = galleryItem.dateString,
-                                                modifier = Modifier.padding(start = 12.dp, top = 16.dp, bottom = 8.dp),
-                                                color = Color.White,
-                                                style = MaterialTheme.typography.bodySmall
-                                            )
+                                            Column(
+                                                modifier = Modifier
+                                                    .padding(horizontal = 8.dp)
+                                                    .padding(top = 20.dp, bottom = 8.dp)
+                                            ) {
+                                                Text(
+                                                    text = galleryItem.dateString,
+                                                    color = Color.White,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                HorizontalDivider(
+                                                    thickness = 0.5.dp,
+                                                    color = Color.White.copy(alpha = 0.3f)
+                                                )
+                                            }
                                         }
                                         is GalleryItem.Media -> {
                                             val media = galleryItem.media
@@ -2852,42 +2878,7 @@ private val screenshotRegex = Regex("""Screenshot_(\d{8})_(\d{6})""")
 private val signalRegex = Regex("""signal-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})""")
 
 fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: String?, mediaStoreDateTaken: Long): Long {
-    // 1. Try Metadata extraction
-    if (mimeType?.startsWith("image/") == true) {
-        try {
-            context.contentResolver.openInputStream(uri)?.use { inputStream ->
-                val exif = ExifInterface(inputStream)
-                val dateStr = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
-                if (dateStr != null) {
-                    val sdf = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US)
-                    sdf.parse(dateStr)?.time?.let { return it }
-                }
-            }
-        } catch (_: Exception) {}
-    } else if (mimeType?.startsWith("video/") == true) {
-        try {
-            val retriever = MediaMetadataRetriever()
-            retriever.setDataSource(context, uri)
-            val dateStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)
-            retriever.release()
-            if (dateStr != null) {
-                // MediaMetadataRetriever dates can vary in format, but often yyyyMMdd'T'HHmmss.SSS'Z'
-                val formats = listOf(
-                    "yyyyMMdd'T'HHmmss.SSS'Z'",
-                    "yyyyMMdd'T'HHmmss'Z'",
-                    "yyyy:MM:dd HH:mm:ss"
-                )
-                for (format in formats) {
-                    try {
-                        val sdf = SimpleDateFormat(format, Locale.US)
-                        sdf.parse(dateStr)?.time?.let { return it }
-                    } catch (_: Exception) {}
-                }
-            }
-        } catch (_: Exception) {}
-    }
-
-    // 2. Try Filename parsing
+    // 1. Try Filename parsing (Fast)
     displayName?.let { name ->
         screenshotRegex.find(name)?.let { match ->
             try {
@@ -2909,8 +2900,8 @@ fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: 
     // 3. Fallback to MediaStore DATE_TAKEN
     if (mediaStoreDateTaken > 0) return mediaStoreDateTaken
 
-    // 4. Ultimate fallback to current time
-    return System.currentTimeMillis()
+    // 4. Ultimate fallback to 0 (marks as Unsorted)
+    return 0L
 }
 
 fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {

@@ -25,8 +25,6 @@ git fetch --all
 git remote -v
 ```
 
-
 ![qrcode-gh.png](media/qrcode-gh.png)
-
 
 **[RobertoTorino](https://github.com/RobertoTorino)**        
