@@ -28,7 +28,7 @@ if /i "%CHOICE%"=="y" (
 if %ERRORLEVEL% EQU 0 (
     echo.
     echo Build Successful!
-    echo APK location: app\build\outputs\apk\debug\gallery-debug.apk
+    echo APK location: app\build\outputs\apk\debug\Gallery-debug.apk
     explorer "app\build\outputs\apk\debug"
 ) else (
     echo.

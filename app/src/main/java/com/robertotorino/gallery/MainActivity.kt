@@ -159,6 +159,16 @@ import kotlin.math.min
 import kotlin.math.roundToLong
 import androidx.media3.common.MediaItem as ExoMediaItem
 
+enum class MediaDateSource {
+    MEDIA_STORE,
+    EXIF,
+    FILENAME,
+    VIDEO_METADATA,
+    UNKNOWN
+}
+
+data class DateResult(val date: Long, val source: MediaDateSource)
+
 fun Context.getActivity(): AppCompatActivity? = when (this) {
     is AppCompatActivity -> this
     is ContextWrapper -> baseContext.getActivity()
@@ -275,8 +285,9 @@ fun queryImages(context: Context): List<MediaItem> {
             val mime = cursor.getString(mimeColumn)
             val added = cursor.getLong(addedColumn)
             val takenRaw = cursor.getLong(takenColumn)
-            val bestDate = extractBestDate(context, uri, name, mime, takenRaw)
-            items.add(MediaItem(uri, path, name, size, mime, added, bestDate, isDateFallback = takenRaw <= 0))
+            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw)
+            val isFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN
+            items.add(MediaItem(uri, path, name, size, mime, added, bestDateResult.date, isDateFallback = isFallback))
         }
     }
     return items
@@ -327,8 +338,9 @@ fun queryVideos(context: Context): List<MediaItem> {
             val mime = cursor.getString(mimeColumn)
             val added = cursor.getLong(addedColumn)
             val takenRaw = cursor.getLong(takenColumn)
-            val bestDate = extractBestDate(context, uri, name, mime, takenRaw)
-            items.add(MediaItem(uri, path, name, size, mime, added, bestDate, isDateFallback = takenRaw <= 0))
+            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw)
+            val isFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN
+            items.add(MediaItem(uri, path, name, size, mime, added, bestDateResult.date, isDateFallback = isFallback))
         }
     }
     return items
@@ -3116,44 +3128,11 @@ private val signalRegex = Regex("""signal-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})"
 private val photoDashedDateTimeRegex = Regex("""PHOTO-((?:19|20)\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})""")
 private val compactDateTimeRegex = Regex("""(?:^|\D)((?:19|20)\d{2})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})(?:\D|$)""")
 
-fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: String?, mediaStoreDateTaken: Long): Long {
+fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: String?, mediaStoreDateTaken: Long): DateResult {
     // 1. MediaStore DATE_TAKEN is generally reliable if present
-    if (mediaStoreDateTaken > 0) return mediaStoreDateTaken
+    if (mediaStoreDateTaken > 0) return DateResult(mediaStoreDateTaken, MediaDateSource.MEDIA_STORE)
 
-    // 2. Try Filename parsing (Fast)
-    displayName?.let { name ->
-        screenshotRegex.find(name)?.let { match ->
-            try {
-                val datePart = match.groupValues[1] // yyyyMMdd
-                val timePart = match.groupValues[2] // HHmmss
-                val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
-                sdf.parse("${datePart}_${timePart}")?.time?.let { return it }
-            } catch (_: Exception) {}
-        }
-        signalRegex.find(name)?.let { match ->
-            try {
-                val dateStr = match.groupValues[1] // yyyy-MM-dd-HH-mm-ss
-                val sdf = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US)
-                sdf.parse(dateStr)?.time?.let { return it }
-            } catch (_: Exception) {}
-        }
-        photoDashedDateTimeRegex.find(name)?.let { match ->
-            try {
-                val dateStr = match.groupValues[1] // yyyy-MM-dd-HH-mm-ss
-                val sdf = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US)
-                sdf.parse(dateStr)?.time?.let { return it }
-            } catch (_: Exception) {}
-        }
-        compactDateTimeRegex.find(name)?.let { match ->
-            try {
-                val dateStr = "${match.groupValues[1]}-${match.groupValues[2]}-${match.groupValues[3]} ${match.groupValues[4]}:${match.groupValues[5]}:${match.groupValues[6]}"
-                val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-                sdf.parse(dateStr)?.time?.let { return it }
-            } catch (_: Exception) {}
-        }
-    }
-
-    // 3. Try EXIF DateTimeOriginal/DateTime/Digitized when available for images
+    // 2. Try EXIF DateTimeOriginal/DateTime/Digitized when available for images
     if (mimeType?.startsWith("image/") == true) {
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
@@ -3162,13 +3141,15 @@ fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: 
                     ?: exif.getAttribute(ExifInterface.TAG_DATETIME)
                     ?: exif.getAttribute(ExifInterface.TAG_DATETIME_DIGITIZED)
                 exifDate?.let { dateStr ->
-                    parseExifDateToMillis(dateStr)?.let { parsed -> return parsed }
+                    parseExifDateToMillis(dateStr)?.let { parsed ->
+                        return DateResult(parsed, MediaDateSource.EXIF)
+                    }
                 }
             }
         } catch (_: Exception) {}
     }
 
-    // 4. Try MediaMetadataRetriever for videos
+    // 3. Try MediaMetadataRetriever for videos
     if (mimeType?.startsWith("video/") == true) {
         try {
             val retriever = MediaMetadataRetriever()
@@ -3185,18 +3166,52 @@ fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: 
                 for (format in formats) {
                     try {
                         val sdf = SimpleDateFormat(format, Locale.US)
-                        // Video dates are often stored in UTC
                         if (format.contains("'Z'") || format.contains("zzz")) {
                             sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
                         }
-                        sdf.parse(it)?.time?.let { parsed -> return parsed }
+                        sdf.parse(it)?.time?.let { parsed ->
+                            return DateResult(parsed, MediaDateSource.VIDEO_METADATA)
+                        }
                     } catch (_: Exception) {}
                 }
             }
         } catch (_: Exception) {}
     }
 
-    return 0L
+    // 4. Try Filename parsing (Fast)
+    displayName?.let { name ->
+        screenshotRegex.find(name)?.let { match ->
+            try {
+                val datePart = match.groupValues[1]
+                val timePart = match.groupValues[2]
+                val sdf = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
+                sdf.parse("${datePart}_${timePart}")?.time?.let { return DateResult(it, MediaDateSource.FILENAME) }
+            } catch (_: Exception) {}
+        }
+        signalRegex.find(name)?.let { match ->
+            try {
+                val dateStr = match.groupValues[1]
+                val sdf = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US)
+                sdf.parse(dateStr)?.time?.let { return DateResult(it, MediaDateSource.FILENAME) }
+            } catch (_: Exception) {}
+        }
+        photoDashedDateTimeRegex.find(name)?.let { match ->
+            try {
+                val dateStr = match.groupValues[1]
+                val sdf = SimpleDateFormat("yyyy-MM-dd-HH-mm-ss", Locale.US)
+                sdf.parse(dateStr)?.time?.let { return DateResult(it, MediaDateSource.FILENAME) }
+            } catch (_: Exception) {}
+        }
+        compactDateTimeRegex.find(name)?.let { match ->
+            try {
+                val dateStr = "${match.groupValues[1]}-${match.groupValues[2]}-${match.groupValues[3]} ${match.groupValues[4]}:${match.groupValues[5]}:${match.groupValues[6]}"
+                val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                sdf.parse(dateStr)?.time?.let { return DateResult(it, MediaDateSource.FILENAME) }
+            } catch (_: Exception) {}
+        }
+    }
+
+    return DateResult(0L, MediaDateSource.UNKNOWN)
 }
 
 fun parseExifDateToMillis(dateStr: String): Long? {
@@ -3234,17 +3249,20 @@ fun fixDateTimeOriginalIfMissing(context: Context, uri: Uri): Boolean {
     return try {
         context.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
             val exif = ExifInterface(pfd.fileDescriptor)
-            if (!exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL).isNullOrBlank()) {
-                return false
-            }
+            val exifDate = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
 
-            val mimeType = context.contentResolver.getType(uri) ?: ""
-            var displayName: String? = null
             var mediaStoreDateTaken = 0L
+            var mediaStoreDateAdded = 0L
+            var displayName: String? = null
+            val mimeType = context.contentResolver.getType(uri) ?: ""
 
             context.contentResolver.query(
                 resolveToMediaStoreUri(context, uri),
-                arrayOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.DATE_TAKEN),
+                arrayOf(
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    MediaStore.MediaColumns.DATE_TAKEN,
+                    MediaStore.MediaColumns.DATE_ADDED
+                ),
                 null,
                 null,
                 null
@@ -3252,17 +3270,57 @@ fun fixDateTimeOriginalIfMissing(context: Context, uri: Uri): Boolean {
                 if (cursor.moveToFirst()) {
                     val nameIndex = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
                     val dateTakenIndex = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_TAKEN)
+                    val dateAddedIndex = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED)
                     if (nameIndex >= 0) displayName = cursor.getString(nameIndex)
                     if (dateTakenIndex >= 0) mediaStoreDateTaken = cursor.getLong(dateTakenIndex)
+                    if (dateAddedIndex >= 0) mediaStoreDateAdded = cursor.getLong(dateAddedIndex)
                 }
             }
 
-            val dateMillis = extractBestDate(context, uri, displayName, mimeType, mediaStoreDateTaken)
+            val isExifMissing = exifDate.isNullOrBlank() || exifDate.contains("0000:00:00")
+
+            if (!isExifMissing) {
+                if (mediaStoreDateTaken <= 0) {
+                    val dateMillis = parseExifDateToMillis(exifDate!!)
+                    if (dateMillis != null && dateMillis > 0) {
+                        val values = ContentValues().apply {
+                            put(MediaStore.Images.Media.DATE_TAKEN, dateMillis)
+                        }
+                        context.contentResolver.update(resolveToMediaStoreUri(context, uri), values, null, null)
+                        return true
+                    }
+                }
+                return false
+            }
+
+            val bestDateResult = extractBestDate(context, uri, displayName, mimeType, mediaStoreDateTaken)
+            var dateMillis = bestDateResult.date
+            
+            if (dateMillis <= 0L) {
+                if (mediaStoreDateAdded > 0) {
+                    dateMillis = mediaStoreDateAdded * 1000
+                } else {
+                    val path = getRealPathFromUri(context, uri)
+                    if (path != null) {
+                        val file = File(path)
+                        if (file.exists()) {
+                            dateMillis = file.lastModified()
+                        }
+                    }
+                }
+            }
+
             if (dateMillis <= 0L) return false
 
             val dateToWrite = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(dateMillis))
             exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, dateToWrite)
             exif.saveAttributes()
+
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DATE_TAKEN, dateMillis)
+            }
+            context.contentResolver.update(resolveToMediaStoreUri(context, uri), values, null, null)
+
             true
         } ?: false
     } catch (_: Exception) {
@@ -3346,8 +3404,9 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
                 val mimeType = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE))
                 val dateAdded = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED))
                 val dateTakenRaw = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_TAKEN))
-                val dateTaken = extractBestDate(context, uri, name, mimeType, dateTakenRaw)
-                mediaItem = MediaItem(uri, path, name, size, mimeType, dateAdded, dateTaken, isDateFallback = dateTakenRaw <= 0)
+                val bestDateResult = extractBestDate(context, uri, name, mimeType, dateTakenRaw)
+                val isFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN
+                mediaItem = MediaItem(uri, path, name, size, mimeType, dateAdded, bestDateResult.date, isDateFallback = isFallback)
             }
         }
     } catch (_: Exception) {}
@@ -3361,8 +3420,8 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
                     val size = cursor.getLong(cursor.getColumnIndexOrThrow(OpenableColumns.SIZE))
                     val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
                     val now = System.currentTimeMillis()
-                    val dateTaken = extractBestDate(context, uri, name, mimeType, 0L)
-                    mediaItem = MediaItem(uri, uri.path ?: "", name, size, mimeType, now / 1000, dateTaken, isDateFallback = true)
+                    val bestDateResult = extractBestDate(context, uri, name, mimeType, 0L)
+                    mediaItem = MediaItem(uri, uri.path ?: "", name, size, mimeType, now / 1000, bestDateResult.date, isDateFallback = true)
                 }
             }
         } catch (_: Exception) {}

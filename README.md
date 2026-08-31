@@ -10,7 +10,7 @@
 #### Install/Uninstall Apps
 ```
 adb uninstall com.robertotorino.gallery
-adb install app\build\outputs\apk\debug\gallery-debug.apk
+adb install app\build\outputs\apk\debug\Gallery-debug.apk
 adb shell pm clear com.robertotorino.gallery
 ```
 
