@@ -3,6 +3,7 @@ package com.robertotorino.gallery
 import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.RecoverableSecurityException
 import android.app.WallpaperManager
 import android.content.ContentUris
 import android.content.ContentValues
@@ -15,6 +16,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Parcel
@@ -23,6 +25,7 @@ import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.util.Log
 import android.util.Size
 import android.view.View
 import android.widget.Toast
@@ -54,12 +57,10 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -68,7 +69,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.automirrored.filled.RotateRight
-import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckBox
@@ -79,7 +79,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterBAndW
 import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.Fullscreen
-import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Inventory
 import androidx.compose.material.icons.filled.Security
@@ -87,8 +86,6 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -128,7 +125,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -250,7 +246,7 @@ fun openManagedFolderInPicker(context: Context, folderName: String) {
     }
 }
 
-fun queryImages(context: Context, fastLoading: Boolean = false): List<MediaItem> {
+fun queryImages(context: Context): List<MediaItem> {
     val items = mutableListOf<MediaItem>()
     val projection = arrayOf(
         MediaStore.Images.Media._ID,
@@ -295,7 +291,7 @@ fun queryImages(context: Context, fastLoading: Boolean = false): List<MediaItem>
             val mime = cursor.getString(mimeColumn)
             val added = cursor.getLong(addedColumn)
             val takenRaw = cursor.getLong(takenColumn)
-            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw, fastLoading)
+            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw)
             val isFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN
             items.add(MediaItem(uri, path, name, size, mime, added, bestDateResult.date, isDateFallback = isFallback))
         }
@@ -303,7 +299,7 @@ fun queryImages(context: Context, fastLoading: Boolean = false): List<MediaItem>
     return items
 }
 
-fun queryVideos(context: Context, fastLoading: Boolean = false): List<MediaItem> {
+fun queryVideos(context: Context): List<MediaItem> {
     val items = mutableListOf<MediaItem>()
     val projection = arrayOf(
         MediaStore.Video.Media._ID,
@@ -348,7 +344,7 @@ fun queryVideos(context: Context, fastLoading: Boolean = false): List<MediaItem>
             val mime = cursor.getString(mimeColumn)
             val added = cursor.getLong(addedColumn)
             val takenRaw = cursor.getLong(takenColumn)
-            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw, fastLoading)
+            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw)
             val isFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN
             items.add(MediaItem(uri, path, name, size, mime, added, bestDateResult.date, isDateFallback = isFallback))
         }
@@ -756,6 +752,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var showWallpaperConfirm by remember { mutableStateOf(false) }
     var pendingWallpaperUri by remember { mutableStateOf<Uri?>(null) }
     var preparedRecycledItems by remember { mutableStateOf<List<Pair<Uri, com.robertotorino.gallery.data.RecycledItem>>>(emptyList()) }
+    var pendingRepairUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
 
     var useRecycleBin by remember { mutableStateOf(prefs.getBoolean("use_recycle_bin", false)) }
     var recycleBinDays by remember { mutableIntStateOf(prefs.getInt("recycle_bin_days", 30)) }
@@ -954,6 +951,34 @@ fun GalleryScreen(initialUri: Uri? = null) {
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
+            if (pendingRepairUris.isNotEmpty()) {
+                scope.launch {
+                    val uris = pendingRepairUris
+                    pendingRepairUris = emptyList()
+                    var repairedCount = 0
+                    withContext(Dispatchers.IO) {
+                        uris.forEach { uri ->
+                            try {
+                                if (fixDateTimeOriginalIfMissing(context, uri)) {
+                                    repairedCount++
+                                }
+                            } catch (_: RecoverableSecurityException) {
+                            }
+                        }
+                    }
+                    if (repairedCount > 0) {
+                        Toast.makeText(context, "Repaired $repairedCount items", Toast.LENGTH_SHORT).show()
+                        val updatedUris = uris.toSet()
+                        imageItems = imageItems.map { item ->
+                            if (item.uri in updatedUris) {
+                                getMediaItemFromUri(context, item.uri) ?: item
+                            } else item
+                        }
+                    }
+                }
+                return@rememberLauncherForActivityResult
+            }
+
             val deletedUris = urisToDelete
 
             // Finalize Recycle Bin / Archive moves if any
@@ -989,6 +1014,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
             } else "deleted"
             Toast.makeText(context, "$deletedMediaLabel $actionLabel", Toast.LENGTH_SHORT).show()
         } else {
+            pendingRepairUris = emptyList()
             // Abandon all prepared items if user cancels deletion
             if (preparedRecycledItems.isNotEmpty()) {
                 scope.launch {
@@ -2269,23 +2295,61 @@ fun GalleryScreen(initialUri: Uri? = null) {
             filterByDate = filterByDate,
             filterByExifSoftware = filterByExifSoftware,
             filterByExifArtist = filterByExifArtist,
-            fastLoadingEnabled = fastLoadingEnabled,
             onFilterByDateChanged = { filterByDate = it },
             onFilterByExifSoftwareChanged = { filterByExifSoftware = it },
             onFilterByExifArtistChanged = { filterByExifArtist = it },
-            onFastLoadingChanged = { fastLoadingEnabled = it },
             onRepairMissingDates = {
                 scope.launch {
-                    val itemsToRepair = filteredItems.filter { it.isDateFallback }
-                    var repairedCount = 0
-                    withContext(Dispatchers.IO) {
-                        itemsToRepair.forEach { item ->
-                            if (fixDateTimeOriginalIfMissing(context, item.uri)) {
-                                repairedCount++
+                    val itemsToRepair = filteredItems.filter { it.isDateFallback || it.dateTaken <= 0L }.map { it.uri }
+                    if (itemsToRepair.isEmpty()) {
+                        Toast.makeText(context, "No items need repair", Toast.LENGTH_SHORT).show()
+                        showFilterSettings = false
+                        return@launch
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        try {
+                            val pendingIntent = MediaStore.createWriteRequest(context.contentResolver, itemsToRepair)
+                            pendingRepairUris = itemsToRepair
+                            intentSenderLauncher.launch(
+                                IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                            )
+                        } catch (e: Exception) {
+                            Log.e("MetadataRepair", "Failed to create write request", e)
+                        }
+                    } else {
+                        var repairedCount = 0
+                        var securityException: RecoverableSecurityException? = null
+                        withContext(Dispatchers.IO) {
+                            for (uri in itemsToRepair) {
+                                try {
+                                    if (fixDateTimeOriginalIfMissing(context, uri)) {
+                                        repairedCount++
+                                    }
+                                } catch (e: RecoverableSecurityException) {
+                                    securityException = e
+                                    pendingRepairUris = itemsToRepair.dropWhile { it != uri }
+                                    break
+                                }
+                            }
+                        }
+
+                        if (securityException != null) {
+                            intentSenderLauncher.launch(
+                                IntentSenderRequest.Builder(securityException!!.userAction.actionIntent.intentSender).build()
+                            )
+                        } else {
+                            Toast.makeText(context, "Repaired $repairedCount items", Toast.LENGTH_SHORT).show()
+                            if (repairedCount > 0) {
+                                val updatedUris = itemsToRepair.toSet()
+                                imageItems = imageItems.map { item ->
+                                    if (item.uri in updatedUris) {
+                                        getMediaItemFromUri(context, item.uri) ?: item
+                                    } else item
+                                }
                             }
                         }
                     }
-                    Toast.makeText(context, "Repaired $repairedCount items", Toast.LENGTH_SHORT).show()
                     showFilterSettings = false
                 }
             },
@@ -2299,11 +2363,9 @@ fun FilterSettingsDialog(
     filterByDate: Boolean,
     filterByExifSoftware: Boolean,
     filterByExifArtist: Boolean,
-    fastLoadingEnabled: Boolean,
     onFilterByDateChanged: (Boolean) -> Unit,
     onFilterByExifSoftwareChanged: (Boolean) -> Unit,
     onFilterByExifArtistChanged: (Boolean) -> Unit,
-    onFastLoadingChanged: (Boolean) -> Unit,
     onRepairMissingDates: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2892,7 +2954,6 @@ fun VideoPlayerDialog(
 ) {
     val context = LocalContext.current
     var showVideoToolbar by remember { mutableStateOf(false) }
-    var isMuted by remember { mutableStateOf(false) }
     val player = remember(context, uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(ExoMediaItem.fromUri(uri))
@@ -2952,22 +3013,6 @@ fun VideoPlayerDialog(
                 Icon(
                     Icons.Default.Close,
                     contentDescription = "Close video",
-                    tint = Color.White
-                )
-            }
-
-            IconButton(
-                onClick = {
-                    isMuted = !isMuted
-                    player.volume = if (isMuted) 0f else 1f
-                },
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(16.dp)
-            ) {
-                Icon(
-                    if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
-                    contentDescription = if (isMuted) "Unmute video" else "Mute video",
                     tint = Color.White
                 )
             }
@@ -3342,22 +3387,9 @@ private val signalRegex = Regex("""signal-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})"
 private val photoDashedDateTimeRegex = Regex("""PHOTO-((?:19|20)\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})""")
 private val compactDateTimeRegex = Regex("""(?:^|\D)((?:19|20)\d{2})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})(?:\D|$)""")
 
-fun extractBestDate(
-    context: Context,
-    uri: Uri,
-    displayName: String?,
-    mimeType: String?,
-    mediaStoreDateTaken: Long,
-    fastLoading: Boolean = false
-): DateResult {
+fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: String?, mediaStoreDateTaken: Long): DateResult {
     // 1. MediaStore DATE_TAKEN is generally reliable if present
     if (mediaStoreDateTaken > 0) return DateResult(mediaStoreDateTaken, MediaDateSource.MEDIA_STORE)
-
-    // Fast loading skips per-file EXIF/video metadata reads (the slow part of the initial scan)
-    // and relies only on MediaStore data plus cheap filename parsing.
-    if (fastLoading) {
-        return extractDateFromFilename(displayName) ?: DateResult(0L, MediaDateSource.UNKNOWN)
-    }
 
     // 2. Try EXIF DateTimeOriginal/DateTime/Digitized when available for images
     if (mimeType?.startsWith("image/") == true) {
@@ -3406,13 +3438,6 @@ fun extractBestDate(
     }
 
     // 4. Try Filename parsing (Fast)
-    extractDateFromFilename(displayName)?.let { return it }
-
-    return DateResult(0L, MediaDateSource.UNKNOWN)
-}
-
-/** Cheap, I/O-free date extraction from a display name. Used by both fast and full loading paths. */
-fun extractDateFromFilename(displayName: String?): DateResult? {
     displayName?.let { name ->
         screenshotRegex.find(name)?.let { match ->
             try {
@@ -3444,7 +3469,8 @@ fun extractDateFromFilename(displayName: String?): DateResult? {
             } catch (_: Exception) {}
         }
     }
-    return null
+
+    return DateResult(0L, MediaDateSource.UNKNOWN)
 }
 
 fun parseExifDateToMillis(dateStr: String): Long? {
@@ -3479,15 +3505,19 @@ fun parseExifDateToMillis(dateStr: String): Long? {
 }
 
 fun fixDateTimeOriginalIfMissing(context: Context, uri: Uri): Boolean {
+    Log.d("MetadataRepair", "Starting repair for URI: $uri")
     return try {
         context.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+            Log.d("MetadataRepair", "Opened PFD for $uri")
             val exif = ExifInterface(pfd.fileDescriptor)
             val exifDate = exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL)
+            Log.d("MetadataRepair", "Initial EXIF TAG_DATETIME_ORIGINAL: $exifDate")
 
             var mediaStoreDateTaken = 0L
             var mediaStoreDateAdded = 0L
             var displayName: String? = null
             val mimeType = context.contentResolver.getType(uri) ?: ""
+            Log.d("MetadataRepair", "MIME type: $mimeType")
 
             context.contentResolver.query(
                 resolveToMediaStoreUri(context, uri),
@@ -3509,54 +3539,86 @@ fun fixDateTimeOriginalIfMissing(context: Context, uri: Uri): Boolean {
                     if (dateAddedIndex >= 0) mediaStoreDateAdded = cursor.getLong(dateAddedIndex)
                 }
             }
+            Log.d("MetadataRepair", "MediaStore values - Name: $displayName, DateTaken: $mediaStoreDateTaken, DateAdded: $mediaStoreDateAdded")
 
+            var hasChanges = false
             val isExifMissing = exifDate.isNullOrBlank() || exifDate.contains("0000:00:00")
 
             if (!isExifMissing) {
+                Log.d("MetadataRepair", "EXIF date exists, checking MediaStore sync")
                 if (mediaStoreDateTaken <= 0) {
-                    val dateMillis = parseExifDateToMillis(exifDate!!)
+                    val dateMillis = parseExifDateToMillis(exifDate)
                     if (dateMillis != null && dateMillis > 0) {
+                        Log.d("MetadataRepair", "Syncing EXIF date to MediaStore: $dateMillis")
                         val values = ContentValues().apply {
                             put(MediaStore.Images.Media.DATE_TAKEN, dateMillis)
                         }
                         context.contentResolver.update(resolveToMediaStoreUri(context, uri), values, null, null)
-                        return true
+                        hasChanges = true
                     }
                 }
-                return false
-            }
+            } else {
+                Log.d("MetadataRepair", "EXIF date missing or invalid, attempting extraction")
+                val bestDateResult = extractBestDate(context, uri, displayName, mimeType, mediaStoreDateTaken)
+                var dateMillis = bestDateResult.date
+                Log.d("MetadataRepair", "Extracted best date: $dateMillis from source: ${bestDateResult.source}")
 
-            val bestDateResult = extractBestDate(context, uri, displayName, mimeType, mediaStoreDateTaken)
-            var dateMillis = bestDateResult.date
-            
-            if (dateMillis <= 0L) {
-                if (mediaStoreDateAdded > 0) {
-                    dateMillis = mediaStoreDateAdded * 1000
-                } else {
-                    val path = getRealPathFromUri(context, uri)
-                    if (path != null) {
-                        val file = File(path)
-                        if (file.exists()) {
-                            dateMillis = file.lastModified()
+                if (dateMillis <= 0L) {
+                    if (mediaStoreDateAdded > 0) {
+                        dateMillis = mediaStoreDateAdded * 1000
+                        Log.d("MetadataRepair", "Falling back to DateAdded: $dateMillis")
+                    } else {
+                        val path = getRealPathFromUri(context, uri)
+                        if (path != null) {
+                            val file = File(path)
+                            if (file.exists()) {
+                                dateMillis = file.lastModified()
+                                Log.d("MetadataRepair", "Falling back to File lastModified: $dateMillis")
+                            }
                         }
                     }
                 }
+
+                if (dateMillis > 0L) {
+                    val dateToWrite = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(dateMillis))
+                    Log.d("MetadataRepair", "Setting EXIF TAG_DATETIME_ORIGINAL to: $dateToWrite")
+                    exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, dateToWrite)
+
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.DATE_TAKEN, dateMillis)
+                    }
+                    context.contentResolver.update(resolveToMediaStoreUri(context, uri), values, null, null)
+                    hasChanges = true
+                }
             }
 
-            if (dateMillis <= 0L) return false
-
-            val dateToWrite = SimpleDateFormat("yyyy:MM:dd HH:mm:ss", Locale.US).format(Date(dateMillis))
-            exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, dateToWrite)
-            exif.saveAttributes()
-
-            val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DATE_TAKEN, dateMillis)
+            // Always attempt to fix Software/Artist if they are missing while we have the file open
+            if (exif.getAttribute(ExifInterface.TAG_SOFTWARE).isNullOrBlank()) {
+                Log.d("MetadataRepair", "Setting Software tag")
+                exif.setAttribute(ExifInterface.TAG_SOFTWARE, "Gallery")
+                hasChanges = true
             }
-            context.contentResolver.update(resolveToMediaStoreUri(context, uri), values, null, null)
+            if (exif.getAttribute(ExifInterface.TAG_ARTIST).isNullOrBlank()) {
+                Log.d("MetadataRepair", "Setting Artist tag")
+                exif.setAttribute(ExifInterface.TAG_ARTIST, "User")
+                hasChanges = true
+            }
 
-            true
-        } ?: false
-    } catch (_: Exception) {
+            if (hasChanges) {
+                Log.d("MetadataRepair", "Saving EXIF attributes")
+                exif.saveAttributes()
+            }
+            Log.d("MetadataRepair", "Repair finished. Changes made: $hasChanges")
+            hasChanges
+        } ?: run {
+            Log.e("MetadataRepair", "Failed to open PFD for $uri")
+            false
+        }
+    } catch (e: RecoverableSecurityException) {
+        Log.e("MetadataRepair", "RecoverableSecurityException during repair for $uri", e)
+        throw e
+    } catch (e: Exception) {
+        Log.e("MetadataRepair", "Exception during repair for $uri", e)
         false
     }
 }
@@ -3567,51 +3629,20 @@ fun hasRequestedExifTags(
     requireSoftware: Boolean,
     requireArtist: Boolean
 ): Boolean {
+    Log.d("MetadataRepair", "Checking EXIF tags for $uri. requireSoftware: $requireSoftware, requireArtist: $requireArtist")
     if (!requireSoftware && !requireArtist) return true
     return try {
         context.contentResolver.openInputStream(uri)?.use { input ->
             val exif = ExifInterface(input)
-            val hasSoftware = exif.getAttribute(ExifInterface.TAG_SOFTWARE)?.isNotBlank() == true
-            val hasArtist = exif.getAttribute(ExifInterface.TAG_ARTIST)?.isNotBlank() == true
+            val software = exif.getAttribute(ExifInterface.TAG_SOFTWARE)
+            val artist = exif.getAttribute(ExifInterface.TAG_ARTIST)
+            Log.d("MetadataRepair", "Found tags - Software: $software, Artist: $artist")
+            val hasSoftware = software?.isNotBlank() == true
+            val hasArtist = artist?.isNotBlank() == true
             (!requireSoftware || hasSoftware) && (!requireArtist || hasArtist)
         } ?: false
-    } catch (_: Exception) {
-        false
-    }
-}
-
-fun writeBackMissingExifTags(
-    context: Context,
-    uri: Uri,
-    software: String?,
-    artist: String?
-): Boolean {
-    if (software.isNullOrBlank() && artist.isNullOrBlank()) return false
-    return try {
-        context.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
-            val exif = ExifInterface(pfd.fileDescriptor)
-            var hasChanges = false
-
-            if (!software.isNullOrBlank() &&
-                exif.getAttribute(ExifInterface.TAG_SOFTWARE).isNullOrBlank()
-            ) {
-                exif.setAttribute(ExifInterface.TAG_SOFTWARE, software)
-                hasChanges = true
-            }
-
-            if (!artist.isNullOrBlank() &&
-                exif.getAttribute(ExifInterface.TAG_ARTIST).isNullOrBlank()
-            ) {
-                exif.setAttribute(ExifInterface.TAG_ARTIST, artist)
-                hasChanges = true
-            }
-
-            if (hasChanges) {
-                exif.saveAttributes()
-            }
-            hasChanges
-        } ?: false
-    } catch (_: Exception) {
+    } catch (e: Exception) {
+        Log.e("MetadataRepair", "Error reading EXIF for filtering: $uri", e)
         false
     }
 }
@@ -3638,8 +3669,9 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
                 val dateAdded = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED))
                 val dateTakenRaw = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_TAKEN))
                 val bestDateResult = extractBestDate(context, uri, name, mimeType, dateTakenRaw)
-                val isFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN
-                mediaItem = MediaItem(uri, path, name, size, mimeType, dateAdded, bestDateResult.date, isDateFallback = isFallback)
+                val hasStoredDate = dateTakenRaw > 0L
+                val isFallback = !hasStoredDate && (bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN)
+                mediaItem = MediaItem(uri, path, name, size, mimeType, dateAdded, if (hasStoredDate) dateTakenRaw else bestDateResult.date, isDateFallback = isFallback)
             }
         }
     } catch (_: Exception) {}
@@ -3654,7 +3686,7 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
                     val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
                     val now = System.currentTimeMillis()
                     val bestDateResult = extractBestDate(context, uri, name, mimeType, 0L)
-                    mediaItem = MediaItem(uri, uri.path ?: "", name, size, mimeType, now / 1000, bestDateResult.date, isDateFallback = true)
+                    mediaItem = MediaItem(uri, uri.path ?: "", name, size, mimeType, now / 1000, bestDateResult.date, isDateFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN)
                 }
             }
         } catch (_: Exception) {}
