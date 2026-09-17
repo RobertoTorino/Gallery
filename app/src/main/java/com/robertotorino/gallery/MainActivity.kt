@@ -16,7 +16,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.os.Parcel
@@ -135,6 +134,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.core.os.ConfigurationCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -840,43 +840,43 @@ fun GalleryScreen(initialUri: Uri? = null) {
     }
 
     LaunchedEffect(useRecycleBin) {
-        prefs.edit().putBoolean("use_recycle_bin", useRecycleBin).apply()
+        prefs.edit { putBoolean("use_recycle_bin", useRecycleBin) }
     }
     LaunchedEffect(recycleBinDays) {
-        prefs.edit().putInt("recycle_bin_days", recycleBinDays).apply()
+        prefs.edit { putInt("recycle_bin_days", recycleBinDays) }
     }
     LaunchedEffect(archiveAfter30Days) {
-        prefs.edit().putBoolean("archive_after_30_days", archiveAfter30Days).apply()
+        prefs.edit { putBoolean("archive_after_30_days", archiveAfter30Days) }
     }
     LaunchedEffect(filterByDate) {
-        prefs.edit().putBoolean("filter_by_date", filterByDate).apply()
+        prefs.edit { putBoolean("filter_by_date", filterByDate) }
     }
     LaunchedEffect(filterByExifSoftware) {
-        prefs.edit().putBoolean("filter_by_exif_software", filterByExifSoftware).apply()
+        prefs.edit { putBoolean("filter_by_exif_software", filterByExifSoftware) }
     }
     LaunchedEffect(filterByExifArtist) {
-        prefs.edit().putBoolean("filter_by_exif_artist", filterByExifArtist).apply()
+        prefs.edit { putBoolean("filter_by_exif_artist", filterByExifArtist) }
     }
     LaunchedEffect(fastLoadingEnabled) {
-        prefs.edit().putBoolean("fast_loading_enabled", fastLoadingEnabled).apply()
+        prefs.edit { putBoolean("fast_loading_enabled", fastLoadingEnabled) }
     }
     LaunchedEffect(galleryViewMode) {
-        prefs.edit().putString("gallery_view_mode", galleryViewMode.name).apply()
+        prefs.edit { putString("gallery_view_mode", galleryViewMode.name) }
     }
 
     LaunchedEffect(excludedPictureFolders) {
-        prefs.edit().putStringSet("excluded_picture_folders", excludedPictureFolders).apply()
+        prefs.edit { putStringSet("excluded_picture_folders", excludedPictureFolders) }
     }
 
     LaunchedEffect(excludedVideoFolders) {
-        prefs.edit().putStringSet("excluded_video_folders", excludedVideoFolders).apply()
+        prefs.edit { putStringSet("excluded_video_folders", excludedVideoFolders) }
     }
 
     LaunchedEffect(imageItems) {
         if (isLoaded) {
             val uriStrings =
                 imageItems.filter { it.uri.scheme == "content" }.map { it.uri.toString() }.toSet()
-            prefs.edit().putStringSet("added_uris", uriStrings).apply()
+            prefs.edit { putStringSet("added_uris", uriStrings) }
         }
     }
 
@@ -2312,48 +2312,14 @@ fun GalleryScreen(initialUri: Uri? = null) {
                         return@launch
                     }
 
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        try {
-                            val pendingIntent = MediaStore.createWriteRequest(context.contentResolver, itemsToRepair)
-                            pendingRepairUris = itemsToRepair
-                            intentSenderLauncher.launch(
-                                IntentSenderRequest.Builder(pendingIntent.intentSender).build()
-                            )
-                        } catch (e: Exception) {
-                            Log.e("MetadataRepair", "Failed to create write request", e)
-                        }
-                    } else {
-                        var repairedCount = 0
-                        var securityException: RecoverableSecurityException? = null
-                        withContext(Dispatchers.IO) {
-                            for (uri in itemsToRepair) {
-                                try {
-                                    if (fixDateTimeOriginalIfMissing(context, uri)) {
-                                        repairedCount++
-                                    }
-                                } catch (e: RecoverableSecurityException) {
-                                    securityException = e
-                                    pendingRepairUris = itemsToRepair.dropWhile { it != uri }
-                                    break
-                                }
-                            }
-                        }
-
-                        if (securityException != null) {
-                            intentSenderLauncher.launch(
-                                IntentSenderRequest.Builder(securityException!!.userAction.actionIntent.intentSender).build()
-                            )
-                        } else {
-                            Toast.makeText(context, "Repaired $repairedCount items", Toast.LENGTH_SHORT).show()
-                            if (repairedCount > 0) {
-                                val updatedUris = itemsToRepair.toSet()
-                                imageItems = imageItems.map { item ->
-                                    if (item.uri in updatedUris) {
-                                        getMediaItemFromUri(context, item.uri) ?: item
-                                    } else item
-                                }
-                            }
-                        }
+                    try {
+                        val pendingIntent = MediaStore.createWriteRequest(context.contentResolver, itemsToRepair)
+                        pendingRepairUris = itemsToRepair
+                        intentSenderLauncher.launch(
+                            IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                        )
+                    } catch (e: Exception) {
+                        Log.e("MetadataRepair", "Failed to create write request", e)
                     }
                     showFilterSettings = false
                 }

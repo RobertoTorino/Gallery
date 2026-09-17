@@ -3,7 +3,6 @@ package com.robertotorino.gallery.worker
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
-import android.os.Build
 import androidx.core.app.NotificationCompat
 
 class NotificationHelper(private val context: Context) {
@@ -18,16 +17,14 @@ class NotificationHelper(private val context: Context) {
     }
 
     fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                CHANNEL_NAME,
-                NotificationManager.IMPORTANCE_DEFAULT
-            ).apply {
-                description = "Notifications for automatic picture cleanup"
-            }
-            notificationManager.createNotificationChannel(channel)
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            CHANNEL_NAME,
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "Notifications for automatic picture cleanup"
         }
+        notificationManager.createNotificationChannel(channel)
     }
 
     fun sendPreCleanupNotification(count: Int, isArchiving: Boolean, hoursRemaining: Int) {
