@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-and-version:
     if: ${{ !contains(github.event.head_commit.message, '[skip-version]') }}
@@ -35,7 +39,10 @@ jobs:
       - name: Make Gradle wrapper executable
         run: chmod +x ./gradlew
 
-      - name: Bump version in app config
+      # The released version is derived from the latest v*.*.* git tag, so master
+      # never receives an automated commit. app/build.gradle.kts is rewritten only
+      # inside this workspace (for the build) and is never committed back.
+      - name: Resolve next version
         id: bump
         shell: bash
         run: |
@@ -43,6 +50,7 @@ jobs:
           python - <<'PY'
           import os
           import re
+          import subprocess
 
           path = 'app/build.gradle.kts'
           with open(path, 'r', encoding='utf-8') as f:
@@ -52,21 +60,30 @@ jobs:
           if not version_match:
               raise SystemExit('versionName not found in app/build.gradle.kts')
 
-          current = version_match.group(1)
+          semver = re.compile(r'^v(\d+)\.(\d+)\.(\d+)$')
+          tags = subprocess.run(
+              ['git', 'tag', '--list', 'v*', '--sort=-v:refname'],
+              capture_output=True, text=True, check=True,
+          ).stdout.split()
+
+          # Highest existing release tag wins; fall back to the checked-in versionName.
+          current = next((t[1:] for t in tags if semver.match(t)), version_match.group(1))
+
           parts = [int(part) for part in current.split('.')]
           while len(parts) < 3:
               parts.append(0)
-          parts[0] = parts[0] if len(parts) >= 1 else 0
-          parts[1] = parts[1] if len(parts) >= 2 else 0
           parts[2] += 1
+
+          existing = set(tags)
+          while f"v{'.'.join(str(p) for p in parts)}" in existing:
+              parts[2] += 1
+
           new_version = '.'.join(str(part) for part in parts)
+          # Monotonic across major/minor bumps, since versionCode is no longer stored.
+          new_code = parts[0] * 10000 + parts[1] * 100 + parts[2]
 
           content = re.sub(r'versionName\s*=\s*"[^"]+"', f'versionName = "{new_version}"', content, count=1)
-
-          code_match = re.search(r'versionCode\s*=\s*(\d+)', content)
-          if code_match:
-              new_code = int(code_match.group(1)) + 1
-              content = re.sub(r'versionCode\s*=\s*\d+', f'versionCode = {new_code}', content, count=1)
+          content = re.sub(r'versionCode\s*=\s*\d+', f'versionCode = {new_code}', content, count=1)
 
           with open(path, 'w', encoding='utf-8') as f:
               f.write(content)
@@ -85,23 +102,16 @@ jobs:
           name: gallery-release-${{ steps.bump.outputs.new_version }}
           path: app/build/outputs/apk/release/*.apk
 
-      - name: Commit version bump and create tag
+      - name: Tag the released commit
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add app/build.gradle.kts
-          if git diff --cached --quiet; then
-            echo "No version change was needed."
-            exit 0
-          fi
-
-          git commit -m "Bump version to ${{ steps.bump.outputs.new_version }} [skip-version]"
-          git tag "v${{ steps.bump.outputs.new_version }}"
-          git push origin HEAD:${{ github.ref_name }}
-          git push origin "v${{ steps.bump.outputs.new_version }}"
+          git tag "${{ steps.bump.outputs.tag }}" "${{ github.sha }}"
+          git push origin "${{ steps.bump.outputs.tag }}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
