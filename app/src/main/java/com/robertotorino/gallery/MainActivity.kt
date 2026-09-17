@@ -9,6 +9,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -53,10 +54,12 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
@@ -65,6 +68,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.automirrored.filled.RotateRight
+import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckBox
@@ -75,6 +79,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterBAndW
 import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Inventory
 import androidx.compose.material.icons.filled.Security
@@ -82,6 +87,8 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -121,6 +128,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -146,6 +154,8 @@ import com.robertotorino.gallery.ui.theme.AppTheme
 import com.robertotorino.gallery.ui.theme.GalleryTheme
 import com.robertotorino.gallery.worker.CleanupWorker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -240,7 +250,7 @@ fun openManagedFolderInPicker(context: Context, folderName: String) {
     }
 }
 
-fun queryImages(context: Context): List<MediaItem> {
+fun queryImages(context: Context, fastLoading: Boolean = false): List<MediaItem> {
     val items = mutableListOf<MediaItem>()
     val projection = arrayOf(
         MediaStore.Images.Media._ID,
@@ -285,7 +295,7 @@ fun queryImages(context: Context): List<MediaItem> {
             val mime = cursor.getString(mimeColumn)
             val added = cursor.getLong(addedColumn)
             val takenRaw = cursor.getLong(takenColumn)
-            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw)
+            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw, fastLoading)
             val isFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN
             items.add(MediaItem(uri, path, name, size, mime, added, bestDateResult.date, isDateFallback = isFallback))
         }
@@ -293,7 +303,7 @@ fun queryImages(context: Context): List<MediaItem> {
     return items
 }
 
-fun queryVideos(context: Context): List<MediaItem> {
+fun queryVideos(context: Context, fastLoading: Boolean = false): List<MediaItem> {
     val items = mutableListOf<MediaItem>()
     val projection = arrayOf(
         MediaStore.Video.Media._ID,
@@ -338,7 +348,7 @@ fun queryVideos(context: Context): List<MediaItem> {
             val mime = cursor.getString(mimeColumn)
             val added = cursor.getLong(addedColumn)
             val takenRaw = cursor.getLong(takenColumn)
-            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw)
+            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw, fastLoading)
             val isFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN
             items.add(MediaItem(uri, path, name, size, mime, added, bestDateResult.date, isDateFallback = isFallback))
         }
@@ -711,6 +721,11 @@ enum class DeleteMediaType {
     VIDEOS
 }
 
+enum class GalleryViewMode {
+    THUMBNAILS,
+    LIST
+}
+
 @SuppressLint("AutoboxingStateCreation")
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -748,6 +763,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var filterByDate by remember { mutableStateOf(prefs.getBoolean("filter_by_date", false)) }
     var filterByExifSoftware by remember { mutableStateOf(prefs.getBoolean("filter_by_exif_software", false)) }
     var filterByExifArtist by remember { mutableStateOf(prefs.getBoolean("filter_by_exif_artist", false)) }
+    var fastLoadingEnabled by remember { mutableStateOf(prefs.getBoolean("fast_loading_enabled", false)) }
 
     var showRecycleBinSettings by remember { mutableStateOf(false) }
     var showArchiveSettings by remember { mutableStateOf(false) }
@@ -771,9 +787,16 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var isLoaded by rememberSaveable { mutableStateOf(false) }
     var selectedMediaTab by rememberSaveable { mutableIntStateOf(0) }
     var videoItems by remember { mutableStateOf<List<MediaItem>>(emptyList()) }
+    var galleryViewMode by rememberSaveable {
+        mutableStateOf(
+            runCatching { GalleryViewMode.valueOf(prefs.getString("gallery_view_mode", null) ?: "") }
+                .getOrDefault(GalleryViewMode.THUMBNAILS)
+        )
+    }
 
-    // Load images from MediaStore and saved folders
-    LaunchedEffect(Unit) {
+    // Load images from MediaStore and saved folders. Re-runs when fast loading is toggled
+    // so the effect of the setting is visible immediately.
+    LaunchedEffect(fastLoadingEnabled) {
         val (foundImages, foundVideos, savedItems) = withContext(Dispatchers.IO) {
             val savedPictureFolders =
                 prefs.getStringSet(
@@ -786,11 +809,15 @@ fun GalleryScreen(initialUri: Uri? = null) {
 
             val savedUris =
                 prefs.getStringSet("added_uris", emptySet())?.map { Uri.parse(it) } ?: emptyList()
+            val fastLoading = fastLoadingEnabled
 
-            val foundImages = queryImages(context)
-            val savedItems = savedUris.mapNotNull { getMediaItemFromUri(context, it) }
-            val foundVideos = queryVideos(context)
-            Triple(foundImages, foundVideos, savedItems)
+            // Images and videos are independent I/O work; run them concurrently.
+            coroutineScope {
+                val imagesDeferred = async { queryImages(context, fastLoading) }
+                val videosDeferred = async { queryVideos(context, fastLoading) }
+                val savedItems = savedUris.mapNotNull { getMediaItemFromUri(context, it) }
+                Triple(imagesDeferred.await(), videosDeferred.await(), savedItems)
+            }
         }
 
         imageItems = (foundImages + savedItems).distinctBy { it.uri }
@@ -827,6 +854,12 @@ fun GalleryScreen(initialUri: Uri? = null) {
     }
     LaunchedEffect(filterByExifArtist) {
         prefs.edit().putBoolean("filter_by_exif_artist", filterByExifArtist).apply()
+    }
+    LaunchedEffect(fastLoadingEnabled) {
+        prefs.edit().putBoolean("fast_loading_enabled", fastLoadingEnabled).apply()
+    }
+    LaunchedEffect(galleryViewMode) {
+        prefs.edit().putString("gallery_view_mode", galleryViewMode.name).apply()
     }
 
     LaunchedEffect(excludedPictureFolders) {
@@ -1128,6 +1161,22 @@ fun GalleryScreen(initialUri: Uri? = null) {
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = AppTheme.colors.cardBackground),
                 actions = {
                     IconButton(
+                        onClick = {
+                            galleryViewMode = if (galleryViewMode == GalleryViewMode.THUMBNAILS) {
+                                GalleryViewMode.LIST
+                            } else {
+                                GalleryViewMode.THUMBNAILS
+                            }
+                        },
+                        modifier = Modifier.padding(end = 4.dp)
+                    ) {
+                        Icon(
+                            if (galleryViewMode == GalleryViewMode.THUMBNAILS) Icons.AutoMirrored.Filled.ViewList else Icons.Default.GridView,
+                            contentDescription = if (galleryViewMode == GalleryViewMode.THUMBNAILS) "Show filenames" else "Show thumbnails",
+                            tint = AppTheme.colors.textPrimary
+                        )
+                    }
+                    IconButton(
                         onClick = { showSettingsMenu = true },
                         modifier = Modifier.padding(end = 8.dp)
                     ) {
@@ -1194,6 +1243,13 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                 text = "Tap anywhere to choose pictures.",
                                 modifier = Modifier.align(Alignment.Center),
                                 color = AppTheme.colors.textSecondary
+                            )
+                        } else if (galleryViewMode == GalleryViewMode.LIST) {
+                            MediaFilenameListView(
+                                groupedItems = groupedItems,
+                                checkedUris = checkedUris,
+                                onCheckedUrisChanged = { checkedUris = it },
+                                onItemClick = { media -> selectedImageIndex = filteredItems.indexOf(media) }
                             )
                         } else {
                             LazyVerticalGrid(
@@ -1313,6 +1369,17 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                 text = "No videos found.",
                                 modifier = Modifier.align(Alignment.Center),
                                 color = AppTheme.colors.textSecondary
+                            )
+                        } else if (galleryViewMode == GalleryViewMode.LIST) {
+                            MediaFilenameListView(
+                                groupedItems = groupedVideoItems,
+                                checkedUris = checkedUris,
+                                onCheckedUrisChanged = { checkedUris = it },
+                                onItemClick = { media ->
+                                    selectedVideoUri = media.uri
+                                    showVideoPlayer = true
+                                    showVideoMetadataDialog = false
+                                }
                             )
                         } else {
                             LazyVerticalGrid(
@@ -2202,9 +2269,11 @@ fun GalleryScreen(initialUri: Uri? = null) {
             filterByDate = filterByDate,
             filterByExifSoftware = filterByExifSoftware,
             filterByExifArtist = filterByExifArtist,
+            fastLoadingEnabled = fastLoadingEnabled,
             onFilterByDateChanged = { filterByDate = it },
             onFilterByExifSoftwareChanged = { filterByExifSoftware = it },
             onFilterByExifArtistChanged = { filterByExifArtist = it },
+            onFastLoadingChanged = { fastLoadingEnabled = it },
             onRepairMissingDates = {
                 scope.launch {
                     val itemsToRepair = filteredItems.filter { it.isDateFallback }
@@ -2230,9 +2299,11 @@ fun FilterSettingsDialog(
     filterByDate: Boolean,
     filterByExifSoftware: Boolean,
     filterByExifArtist: Boolean,
+    fastLoadingEnabled: Boolean,
     onFilterByDateChanged: (Boolean) -> Unit,
     onFilterByExifSoftwareChanged: (Boolean) -> Unit,
     onFilterByExifArtistChanged: (Boolean) -> Unit,
+    onFastLoadingChanged: (Boolean) -> Unit,
     onRepairMissingDates: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2296,6 +2367,30 @@ fun FilterSettingsDialog(
                     Switch(
                         checked = filterByExifArtist,
                         onCheckedChange = onFilterByExifArtistChanged
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                HorizontalDivider(color = AppTheme.colors.textSecondary.copy(alpha = 0.2f))
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("Fast loading", color = AppTheme.colors.textPrimary)
+                        Text(
+                            "Skips reading EXIF/video metadata during scan for a much quicker load. " +
+                                "Photos without a stored date may appear as \"Unsorted\".",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = AppTheme.colors.textSecondary
+                        )
+                    }
+                    Switch(
+                        checked = fastLoadingEnabled,
+                        onCheckedChange = onFastLoadingChanged
                     )
                 }
 
@@ -2696,6 +2791,97 @@ fun FixMetadataDialog(
     )
 }
 
+/**
+ * Text-only alternative to the thumbnail grid: lists each media item's filename,
+ * grouped by the same headers used by the grid view. Selection and click behavior
+ * mirror the grid (tap to open, long-press or tap-while-selecting to check).
+ */
+@Composable
+fun MediaFilenameListView(
+    groupedItems: List<GalleryItem>,
+    checkedUris: Set<Uri>,
+    onCheckedUrisChanged: (Set<Uri>) -> Unit,
+    onItemClick: (MediaItem) -> Unit
+) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)
+    ) {
+        items(groupedItems) { galleryItem ->
+            when (galleryItem) {
+                is GalleryItem.Header -> {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 16.dp, bottom = 8.dp)
+                    ) {
+                        Text(
+                            text = galleryItem.label,
+                            color = AppTheme.colors.textPrimary,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        HorizontalDivider(
+                            thickness = 0.5.dp,
+                            color = AppTheme.colors.textSecondary.copy(alpha = 0.3f)
+                        )
+                    }
+                }
+                is GalleryItem.Media -> {
+                    val media = galleryItem.media
+                    val isChecked = media.uri in checkedUris
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .combinedClickable(
+                                onClick = {
+                                    if (checkedUris.isNotEmpty()) {
+                                        onCheckedUrisChanged(
+                                            if (isChecked) checkedUris - media.uri else checkedUris + media.uri
+                                        )
+                                    } else {
+                                        onItemClick(media)
+                                    }
+                                },
+                                onLongClick = {
+                                    onCheckedUrisChanged(
+                                        if (isChecked) checkedUris - media.uri else checkedUris + media.uri
+                                    )
+                                }
+                            )
+                            .padding(vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (checkedUris.isNotEmpty()) {
+                            Icon(
+                                imageVector = if (isChecked) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
+                                contentDescription = null,
+                                tint = if (isChecked) AppTheme.colors.accent else AppTheme.colors.textSecondary,
+                                modifier = Modifier
+                                    .padding(end = 12.dp)
+                                    .size(20.dp)
+                            )
+                        }
+                        Text(
+                            text = media.displayName,
+                            color = AppTheme.colors.textPrimary,
+                            style = MaterialTheme.typography.bodyMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    HorizontalDivider(
+                        thickness = 0.5.dp,
+                        color = AppTheme.colors.textSecondary.copy(alpha = 0.15f)
+                    )
+                }
+            }
+        }
+    }
+}
+
 @androidx.annotation.OptIn(UnstableApi::class)
 @Composable
 fun VideoPlayerDialog(
@@ -2706,6 +2892,7 @@ fun VideoPlayerDialog(
 ) {
     val context = LocalContext.current
     var showVideoToolbar by remember { mutableStateOf(false) }
+    var isMuted by remember { mutableStateOf(false) }
     val player = remember(context, uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(ExoMediaItem.fromUri(uri))
@@ -2716,6 +2903,17 @@ fun VideoPlayerDialog(
 
     DisposableEffect(player) {
         onDispose { player.release() }
+    }
+
+    // Force landscape orientation for a bigger, more natural viewing experience while
+    // the video player is open, and restore the previous orientation on close.
+    DisposableEffect(Unit) {
+        val activity = context.getActivity()
+        val previousOrientation = activity?.requestedOrientation
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        onDispose {
+            activity?.requestedOrientation = previousOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
     }
 
     Dialog(
@@ -2754,6 +2952,22 @@ fun VideoPlayerDialog(
                 Icon(
                     Icons.Default.Close,
                     contentDescription = "Close video",
+                    tint = Color.White
+                )
+            }
+
+            IconButton(
+                onClick = {
+                    isMuted = !isMuted
+                    player.volume = if (isMuted) 0f else 1f
+                },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+            ) {
+                Icon(
+                    if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                    contentDescription = if (isMuted) "Unmute video" else "Mute video",
                     tint = Color.White
                 )
             }
@@ -3128,9 +3342,22 @@ private val signalRegex = Regex("""signal-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})"
 private val photoDashedDateTimeRegex = Regex("""PHOTO-((?:19|20)\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})""")
 private val compactDateTimeRegex = Regex("""(?:^|\D)((?:19|20)\d{2})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})(?:\D|$)""")
 
-fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: String?, mediaStoreDateTaken: Long): DateResult {
+fun extractBestDate(
+    context: Context,
+    uri: Uri,
+    displayName: String?,
+    mimeType: String?,
+    mediaStoreDateTaken: Long,
+    fastLoading: Boolean = false
+): DateResult {
     // 1. MediaStore DATE_TAKEN is generally reliable if present
     if (mediaStoreDateTaken > 0) return DateResult(mediaStoreDateTaken, MediaDateSource.MEDIA_STORE)
+
+    // Fast loading skips per-file EXIF/video metadata reads (the slow part of the initial scan)
+    // and relies only on MediaStore data plus cheap filename parsing.
+    if (fastLoading) {
+        return extractDateFromFilename(displayName) ?: DateResult(0L, MediaDateSource.UNKNOWN)
+    }
 
     // 2. Try EXIF DateTimeOriginal/DateTime/Digitized when available for images
     if (mimeType?.startsWith("image/") == true) {
@@ -3179,6 +3406,13 @@ fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: 
     }
 
     // 4. Try Filename parsing (Fast)
+    extractDateFromFilename(displayName)?.let { return it }
+
+    return DateResult(0L, MediaDateSource.UNKNOWN)
+}
+
+/** Cheap, I/O-free date extraction from a display name. Used by both fast and full loading paths. */
+fun extractDateFromFilename(displayName: String?): DateResult? {
     displayName?.let { name ->
         screenshotRegex.find(name)?.let { match ->
             try {
@@ -3210,8 +3444,7 @@ fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: 
             } catch (_: Exception) {}
         }
     }
-
-    return DateResult(0L, MediaDateSource.UNKNOWN)
+    return null
 }
 
 fun parseExifDateToMillis(dateStr: String): Long? {
