@@ -57,6 +57,8 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -69,6 +71,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.RotateLeft
 import androidx.compose.material.icons.automirrored.filled.RotateRight
+import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckBox
@@ -79,6 +82,7 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FilterBAndW
 import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Inventory
 import androidx.compose.material.icons.filled.Security
@@ -125,6 +129,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLocale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.Dialog
@@ -246,7 +251,7 @@ fun openManagedFolderInPicker(context: Context, folderName: String) {
     }
 }
 
-fun queryImages(context: Context): List<MediaItem> {
+fun queryImages(context: Context, fastLoading: Boolean = false): List<MediaItem> {
     val items = mutableListOf<MediaItem>()
     val projection = arrayOf(
         MediaStore.Images.Media._ID,
@@ -291,7 +296,7 @@ fun queryImages(context: Context): List<MediaItem> {
             val mime = cursor.getString(mimeColumn)
             val added = cursor.getLong(addedColumn)
             val takenRaw = cursor.getLong(takenColumn)
-            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw)
+            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw, fastLoading)
             val isFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN
             items.add(MediaItem(uri, path, name, size, mime, added, bestDateResult.date, isDateFallback = isFallback))
         }
@@ -299,7 +304,7 @@ fun queryImages(context: Context): List<MediaItem> {
     return items
 }
 
-fun queryVideos(context: Context): List<MediaItem> {
+fun queryVideos(context: Context, fastLoading: Boolean = false): List<MediaItem> {
     val items = mutableListOf<MediaItem>()
     val projection = arrayOf(
         MediaStore.Video.Media._ID,
@@ -344,7 +349,7 @@ fun queryVideos(context: Context): List<MediaItem> {
             val mime = cursor.getString(mimeColumn)
             val added = cursor.getLong(addedColumn)
             val takenRaw = cursor.getLong(takenColumn)
-            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw)
+            val bestDateResult = extractBestDate(context, uri, name, mime, takenRaw, fastLoading)
             val isFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN
             items.add(MediaItem(uri, path, name, size, mime, added, bestDateResult.date, isDateFallback = isFallback))
         }
@@ -2353,6 +2358,8 @@ fun GalleryScreen(initialUri: Uri? = null) {
                     showFilterSettings = false
                 }
             },
+            fastLoadingEnabled = fastLoadingEnabled,
+            onFastLoadingChanged = { fastLoadingEnabled = it },
             onDismiss = { showFilterSettings = false }
         )
     }
@@ -2367,6 +2374,8 @@ fun FilterSettingsDialog(
     onFilterByExifSoftwareChanged: (Boolean) -> Unit,
     onFilterByExifArtistChanged: (Boolean) -> Unit,
     onRepairMissingDates: () -> Unit,
+    fastLoadingEnabled: Boolean,
+    onFastLoadingChanged: (Boolean) -> Unit,
     onDismiss: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -3387,12 +3396,19 @@ private val signalRegex = Regex("""signal-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})"
 private val photoDashedDateTimeRegex = Regex("""PHOTO-((?:19|20)\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})""")
 private val compactDateTimeRegex = Regex("""(?:^|\D)((?:19|20)\d{2})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})(?:\D|$)""")
 
-fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: String?, mediaStoreDateTaken: Long): DateResult {
+fun extractBestDate(
+    context: Context,
+    uri: Uri,
+    displayName: String?,
+    mimeType: String?,
+    mediaStoreDateTaken: Long,
+    fastLoading: Boolean = false
+): DateResult {
     // 1. MediaStore DATE_TAKEN is generally reliable if present
     if (mediaStoreDateTaken > 0) return DateResult(mediaStoreDateTaken, MediaDateSource.MEDIA_STORE)
 
     // 2. Try EXIF DateTimeOriginal/DateTime/Digitized when available for images
-    if (mimeType?.startsWith("image/") == true) {
+    if (!fastLoading && mimeType?.startsWith("image/") == true) {
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 val exif = ExifInterface(input)
@@ -3409,7 +3425,7 @@ fun extractBestDate(context: Context, uri: Uri, displayName: String?, mimeType: 
     }
 
     // 3. Try MediaMetadataRetriever for videos
-    if (mimeType?.startsWith("video/") == true) {
+    if (!fastLoading && mimeType?.startsWith("video/") == true) {
         try {
             val retriever = MediaMetadataRetriever()
             retriever.setDataSource(context, uri)
