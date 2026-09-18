@@ -87,8 +87,12 @@ import androidx.compose.material.icons.filled.Inventory
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.StayCurrentLandscape
+import androidx.compose.material.icons.filled.StayCurrentPortrait
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.Wallpaper
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -2929,6 +2933,8 @@ fun VideoPlayerDialog(
 ) {
     val context = LocalContext.current
     var showVideoToolbar by remember { mutableStateOf(false) }
+    var isMuted by remember { mutableStateOf(false) }
+    var isLandscapeLocked by remember { mutableStateOf(false) }
     val player = remember(context, uri) {
         ExoPlayer.Builder(context).build().apply {
             setMediaItem(ExoMediaItem.fromUri(uri))
@@ -2941,14 +2947,21 @@ fun VideoPlayerDialog(
         onDispose { player.release() }
     }
 
-    // Force landscape orientation for a bigger, more natural viewing experience while
-    // the video player is open, and restore the previous orientation on close.
+    // Orientation is controlled explicitly by the rotate button rather than by the device
+    // auto-rotate setting. The activity's original orientation is restored on close.
     DisposableEffect(Unit) {
         val activity = context.getActivity()
         val previousOrientation = activity?.requestedOrientation
-        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
         onDispose {
             activity?.requestedOrientation = previousOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
+    LaunchedEffect(isLandscapeLocked) {
+        context.getActivity()?.requestedOrientation = if (isLandscapeLocked) {
+            ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
         }
     }
 
@@ -2990,6 +3003,34 @@ fun VideoPlayerDialog(
                     contentDescription = "Close video",
                     tint = Color.White
                 )
+            }
+
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { isLandscapeLocked = !isLandscapeLocked }) {
+                    Icon(
+                        if (isLandscapeLocked) Icons.Default.StayCurrentPortrait else Icons.Default.StayCurrentLandscape,
+                        contentDescription = if (isLandscapeLocked) "Switch to portrait" else "Switch to landscape",
+                        tint = Color.White
+                    )
+                }
+
+                IconButton(
+                    onClick = {
+                        isMuted = !isMuted
+                        player.volume = if (isMuted) 0f else 1f
+                    }
+                ) {
+                    Icon(
+                        if (isMuted) Icons.Default.VolumeOff else Icons.Default.VolumeUp,
+                        contentDescription = if (isMuted) "Unmute video" else "Mute video",
+                        tint = Color.White
+                    )
+                }
             }
 
             if (showVideoToolbar) {
