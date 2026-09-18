@@ -769,7 +769,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
     var filterByDate by remember { mutableStateOf(prefs.getBoolean("filter_by_date", false)) }
     var filterByExifSoftware by remember { mutableStateOf(prefs.getBoolean("filter_by_exif_software", false)) }
     var filterByExifArtist by remember { mutableStateOf(prefs.getBoolean("filter_by_exif_artist", false)) }
-    var fastLoadingEnabled by remember { mutableStateOf(prefs.getBoolean("fast_loading_enabled", false)) }
+    var fastLoadingEnabled by remember { mutableStateOf(prefs.getBoolean("fast_loading_enabled", true)) }
 
     var showRecycleBinSettings by remember { mutableStateOf(false) }
     var showArchiveSettings by remember { mutableStateOf(false) }
@@ -821,7 +821,7 @@ fun GalleryScreen(initialUri: Uri? = null) {
             coroutineScope {
                 val imagesDeferred = async { queryImages(context, fastLoading) }
                 val videosDeferred = async { queryVideos(context, fastLoading) }
-                val savedItems = savedUris.mapNotNull { getMediaItemFromUri(context, it) }
+                val savedItems = savedUris.mapNotNull { getMediaItemFromUri(context, it, fastLoading) }
                 Triple(imagesDeferred.await(), videosDeferred.await(), savedItems)
             }
         }
@@ -885,26 +885,34 @@ fun GalleryScreen(initialUri: Uri? = null) {
     }
 
     val filteredItems = remember(imageItems, excludedPictureFolders, filterByExifSoftware, filterByExifArtist) {
-        imageItems.filter { item ->
-            val path = getRealPathFromUri(context, item.uri) ?: item.uri.toString()
-            val notExcluded = excludedPictureFolders.none { excluded -> path.startsWith(excluded) }
-            val hasRequiredExif = if (!filterByExifSoftware && !filterByExifArtist) {
-                true
-            } else {
-                hasRequestedExifTags(
-                    context = context,
-                    uri = item.uri,
-                    requireSoftware = filterByExifSoftware,
-                    requireArtist = filterByExifArtist
-                )
+        if (excludedPictureFolders.isEmpty() && !filterByExifSoftware && !filterByExifArtist) {
+            imageItems
+        } else {
+            imageItems.filter { item ->
+                val path = item.path.ifBlank { item.uri.toString() }
+                val notExcluded = excludedPictureFolders.none { excluded -> path.startsWith(excluded) }
+                val hasRequiredExif = if (!filterByExifSoftware && !filterByExifArtist) {
+                    true
+                } else {
+                    hasRequestedExifTags(
+                        context = context,
+                        uri = item.uri,
+                        requireSoftware = filterByExifSoftware,
+                        requireArtist = filterByExifArtist
+                    )
+                }
+                notExcluded && hasRequiredExif
             }
-            notExcluded && hasRequiredExif
         }
     }
     val filteredVideoItems = remember(videoItems, excludedVideoFolders) {
-        videoItems.filter { item ->
-            val path = getRealPathFromUri(context, item.uri) ?: item.uri.toString()
-            excludedVideoFolders.none { excluded -> path.startsWith(excluded) }
+        if (excludedVideoFolders.isEmpty()) {
+            videoItems
+        } else {
+            videoItems.filter { item ->
+                val path = item.path.ifBlank { item.uri.toString() }
+                excludedVideoFolders.none { excluded -> path.startsWith(excluded) }
+            }
         }
     }
 
@@ -2996,7 +3004,7 @@ fun VideoPlayerDialog(
                 onClick = onDismiss,
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(16.dp)
+                    .padding(top = 21.dp, start = 16.dp, end = 16.dp, bottom = 16.dp)
             ) {
                 Icon(
                     Icons.Default.Close,
@@ -3008,7 +3016,7 @@ fun VideoPlayerDialog(
             Row(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(16.dp),
+                    .padding(top = 21.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = { isLandscapeLocked = !isLandscapeLocked }) {
@@ -3670,7 +3678,7 @@ fun hasRequestedExifTags(
     }
 }
 
-fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
+fun getMediaItemFromUri(context: Context, uri: Uri, fastLoading: Boolean = false): MediaItem? {
     val mediaStoreUri = resolveToMediaStoreUri(context, uri)
     val projection = arrayOf(
         MediaStore.MediaColumns.DATA,
@@ -3691,7 +3699,7 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
                 val mimeType = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE))
                 val dateAdded = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED))
                 val dateTakenRaw = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_TAKEN))
-                val bestDateResult = extractBestDate(context, uri, name, mimeType, dateTakenRaw)
+                val bestDateResult = extractBestDate(context, uri, name, mimeType, dateTakenRaw, fastLoading)
                 val hasStoredDate = dateTakenRaw > 0L
                 val isFallback = !hasStoredDate && (bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN)
                 mediaItem = MediaItem(uri, path, name, size, mimeType, dateAdded, if (hasStoredDate) dateTakenRaw else bestDateResult.date, isDateFallback = isFallback)
@@ -3708,7 +3716,7 @@ fun getMediaItemFromUri(context: Context, uri: Uri): MediaItem? {
                     val size = cursor.getLong(cursor.getColumnIndexOrThrow(OpenableColumns.SIZE))
                     val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
                     val now = System.currentTimeMillis()
-                    val bestDateResult = extractBestDate(context, uri, name, mimeType, 0L)
+                    val bestDateResult = extractBestDate(context, uri, name, mimeType, 0L, fastLoading)
                     mediaItem = MediaItem(uri, uri.path ?: "", name, size, mimeType, now / 1000, bestDateResult.date, isDateFallback = bestDateResult.source == MediaDateSource.FILENAME || bestDateResult.source == MediaDateSource.UNKNOWN)
                 }
             }
