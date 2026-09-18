@@ -1652,7 +1652,26 @@ fun GalleryScreen(initialUri: Uri? = null) {
                     rememberPagerState(initialPage = initialIndex, pageCount = { filteredItems.size })
                 var isImageZoomed by remember { mutableStateOf(false) }
                 var systemBarsVisible by remember { mutableStateOf(true) }
+                var isLandscapeLocked by remember { mutableStateOf(false) }
                 val activity = LocalContext.current.getActivity()
+
+                // Orientation is controlled explicitly by the rotate button rather than by the
+                // device auto-rotate setting. The original orientation is restored on close.
+                DisposableEffect(Unit) {
+                    val previousOrientation = activity?.requestedOrientation
+                    onDispose {
+                        activity?.requestedOrientation =
+                            previousOrientation ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                    }
+                }
+
+                LaunchedEffect(isLandscapeLocked) {
+                    activity?.requestedOrientation = if (isLandscapeLocked) {
+                        ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+                    } else {
+                        ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT
+                    }
+                }
 
                 LaunchedEffect(pagerState.currentPage) {
                     selectedImageIndex = pagerState.currentPage
@@ -1720,8 +1739,8 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                 .fillMaxWidth()
                                 .height(56.dp),
                             shape = RoundedCornerShape(28.dp),
-                            color = AppTheme.colors.cardBackground.copy(alpha = 0.9f),
-                            tonalElevation = 4.dp
+                            color = Color.Transparent,
+                            tonalElevation = 0.dp
                         ) {
                             Row(
                                 modifier = Modifier
@@ -1731,6 +1750,14 @@ fun GalleryScreen(initialUri: Uri? = null) {
                                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                IconButton(onClick = { isLandscapeLocked = !isLandscapeLocked }) {
+                                    Icon(
+                                        if (isLandscapeLocked) Icons.Default.StayCurrentPortrait else Icons.Default.StayCurrentLandscape,
+                                        if (isLandscapeLocked) "Switch to portrait" else "Switch to landscape",
+                                        tint = if (isLandscapeLocked) AppTheme.colors.accent else AppTheme.colors.boxText,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                }
                                 IconButton(onClick = {
                                     currentUri?.let { uri ->
                                         imageEdits =
@@ -3004,7 +3031,7 @@ fun VideoPlayerDialog(
                 onClick = onDismiss,
                 modifier = Modifier
                     .align(Alignment.TopStart)
-                    .padding(top = 21.dp, start = 16.dp, end = 16.dp, bottom = 16.dp)
+                    .padding(top = 24.dp, start = 16.dp, end = 16.dp, bottom = 16.dp)
             ) {
                 Icon(
                     Icons.Default.Close,
@@ -3016,7 +3043,7 @@ fun VideoPlayerDialog(
             Row(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(top = 21.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
+                    .padding(top = 24.dp, start = 16.dp, end = 16.dp, bottom = 16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 IconButton(onClick = { isLandscapeLocked = !isLandscapeLocked }) {
